@@ -14,7 +14,7 @@ SUPERVISOR_CHAT_ID = "584128222613@c.us"
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Por ahora ponemos flash, pero lo cambiaremos si el diagnóstico lo pide
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-3.5-flash')
 
 chats_pausados = set()
 
