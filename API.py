@@ -9,11 +9,12 @@ app = Flask(__name__)
 ID_INSTANCE = os.getenv("ID_INSTANCE")
 API_TOKEN_INSTANCE = os.getenv("API_TOKEN_INSTANCE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# El número del supervisor debe llevar el @c.us al final
 SUPERVISOR_CHAT_ID = "584128222613@c.us" 
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+
+# Por ahora ponemos flash, pero lo cambiaremos si el diagnóstico lo pide
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 chats_pausados = set()
 
@@ -39,6 +40,27 @@ def send_whatsapp_message(chat_id, text):
     url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/sendMessage/{API_TOKEN_INSTANCE}"
     requests.post(url, json={"chatId": chat_id, "message": text})
 
+# ==========================================
+# NUEVA RUTA DE DIAGNÓSTICO
+# ==========================================
+@app.route('/diagnostico', methods=['GET'])
+def diagnostico():
+    try:
+        modelos = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                modelos.append(m.name)
+        
+        if not modelos:
+            return "<h1>Error</h1><p>Tu API Key es válida, pero Google no te ha habilitado ningún modelo de texto.</p>", 200
+            
+        return f"<h1>Diagnóstico Exitoso</h1><p>Los nombres de modelos que SÍ puedes usar son: <br><br><b>{'<br>'.join(modelos)}</b></p>", 200
+    except Exception as e:
+        return f"<h1>Error de Conexión con Google</h1><p>{str(e)}</p>", 500
+
+# ==========================================
+# EL BOT DE WHATSAPP
+# ==========================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     body = request.get_json()
@@ -56,14 +78,12 @@ def webhook():
 
     if chat_id in chats_pausados: return 'OK', 200
 
-    # 1. ESCALADO AUTOMÁTICO (Si no es texto o la IA decide escalar)
     if msg_type != 'textMessage':
         chats_pausados.add(chat_id)
         send_whatsapp_message(chat_id, "He recibido tu mensaje. Un asesor de Campo Salud te contactará pronto.")
-        send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente {chat_id} necesita atención humana (envió un archivo o audio).")
+        send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente {chat_id} necesita atención (envió un archivo o audio).")
         return 'OK', 200
 
-    # 2. PROCESAR TEXTO
     response = model.generate_content(f"{SYSTEM_PROMPT}\n\nCliente: {text}")
     reply = response.text.strip()
 
