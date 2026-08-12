@@ -40,7 +40,7 @@ def send_whatsapp_message(chat_id, text):
 # NUEVO MOTOR LIGERO DE GOOGLE (CERO MEMORIA)
 # ==========================================
 def consultar_gemini(texto_usuario):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{
             "parts": [{"text": f"{SYSTEM_PROMPT}\n\nCliente: {texto_usuario}"}]
