@@ -5,15 +5,12 @@ import google.generativeai as genai
 
 app = Flask(__name__)
 
-# Credenciales
 ID_INSTANCE = os.getenv("ID_INSTANCE")
 API_TOKEN_INSTANCE = os.getenv("API_TOKEN_INSTANCE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SUPERVISOR_CHAT_ID = "584128222613@c.us" 
 
 genai.configure(api_key=GEMINI_API_KEY)
-
-# Por ahora ponemos flash, pero lo cambiaremos si el diagnóstico lo pide
 model = genai.GenerativeModel('gemini-3.5-flash')
 
 chats_pausados = set()
@@ -23,9 +20,8 @@ Eres el asistente virtual de Campo Salud.
 SENSIBILIDAD ALTA (70%): Si no estás 100% seguro de la respuesta, o si el tema es complejo, financiero o requiere atención personal, NO intentes responder. Responde EXCLUSIVAMENTE: ESCALAR_HUMANO.
 
 REGLAS DE ESCALADO:
-- Si el usuario pide precios, costos o cotizaciones: ESCALAR_HUMANO.
-- Si el usuario envía fotos, archivos o audios: ESCALAR_HUMANO.
-- Si el usuario insiste o se muestra frustrado: ESCALAR_HUMANO.
+- Si piden precios, costos o cotizaciones: ESCALAR_HUMANO.
+- Si envían fotos, archivos o audios: ESCALAR_HUMANO.
 
 MENÚ INICIAL:
 Si saludan, ofrece:
@@ -38,60 +34,68 @@ Si saludan, ofrece:
 
 def send_whatsapp_message(chat_id, text):
     url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/sendMessage/{API_TOKEN_INSTANCE}"
-    requests.post(url, json={"chatId": chat_id, "message": text})
-
-# ==========================================
-# NUEVA RUTA DE DIAGNÓSTICO
-# ==========================================
-@app.route('/diagnostico', methods=['GET'])
-def diagnostico():
     try:
-        modelos = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                modelos.append(m.name)
-        
-        if not modelos:
-            return "<h1>Error</h1><p>Tu API Key es válida, pero Google no te ha habilitado ningún modelo de texto.</p>", 200
-            
-        return f"<h1>Diagnóstico Exitoso</h1><p>Los nombres de modelos que SÍ puedes usar son: <br><br><b>{'<br>'.join(modelos)}</b></p>", 200
+        response = requests.post(url, json={"chatId": chat_id, "message": text})
+        print(f"[GREEN API RESPONSE] Enviado a {chat_id}: Código {response.status_code} | {response.text}")
     except Exception as e:
-        return f"<h1>Error de Conexión con Google</h1><p>{str(e)}</p>", 500
+        print(f"[GREEN API ERROR] No se pudo conectar: {e}")
 
-# ==========================================
-# EL BOT DE WHATSAPP
-# ==========================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     body = request.get_json()
-    if not body or body.get('typeWebhook') != 'incomingMessageReceived': return 'OK', 200
+    if not body or body.get('typeWebhook') != 'incomingMessageReceived': 
+        return 'OK', 200
         
     chat_id = body.get('senderData', {}).get('chatId')
     msg_type = body.get('messageData', {}).get('typeMessage')
-    text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
     is_me = body.get('senderData', {}).get('isMe')
 
+    # Extraer el texto correctamente (sea texto normal o respuesta citada)
+    if msg_type == 'textMessage':
+        text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
+    elif msg_type == 'extendedTextMessage':
+        text = body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
+    else:
+        text = ""
+
+    print(f"\n[MENSAJE ENTRANTE] De: {chat_id} | Tipo: {msg_type} | Texto: {text}")
+
+    # Comandos del administrador (Business)
     if is_me:
-        if text.strip() == '/bot on': chats_pausados.discard(chat_id)
-        elif text.strip() == '/bot off': chats_pausados.add(chat_id)
+        if text.strip() == '/bot on': 
+            chats_pausados.discard(chat_id)
+            print(f"[BOT REACTIVADO] para el chat {chat_id}")
+        elif text.strip() == '/bot off': 
+            chats_pausados.add(chat_id)
+            print(f"[BOT PAUSADO] para el chat {chat_id}")
         return 'OK', 200
 
-    if chat_id in chats_pausados: return 'OK', 200
+    # Si el usuario está en la lista de pausa, ignorarlo
+    if chat_id in chats_pausados: 
+        print(f"[IGNORADO] El chat {chat_id} está en la lista de pausados por el humano.")
+        return 'OK', 200
 
-    if msg_type != 'textMessage':
+    # Si envía archivo/imagen/audio -> Pausar y Escalar
+    if msg_type not in ['textMessage', 'extendedTextMessage']:
+        print(f"[ESCALADO AUTO] Archivo recibido de {chat_id}. Pausando bot.")
         chats_pausados.add(chat_id)
-        send_whatsapp_message(chat_id, "He recibido tu mensaje. Un asesor de Campo Salud te contactará pronto.")
-        send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente {chat_id} necesita atención (envió un archivo o audio).")
+        send_whatsapp_message(chat_id, "He recibido tu mensaje. Un asesor de Campo Salud te contactará pronto. 🧑‍🌾")
+        send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente {chat_id} necesita atención (envió archivo).")
         return 'OK', 200
 
+    # Consultar a la IA
+    print("[CONSULTANDO A GEMINI...]")
     response = model.generate_content(f"{SYSTEM_PROMPT}\n\nCliente: {text}")
     reply = response.text.strip()
+    print(f"[RESPUESTA GEMINI GENERADA CON ÉXITO]")
 
     if "ESCALAR_HUMANO" in reply:
         chats_pausados.add(chat_id)
+        print("[ACCIÓN] Gemini decidió escalar al humano.")
         send_whatsapp_message(chat_id, "Claro, te pondré en contacto con un asesor de Campo Salud. Aguarda un momento... 🧑‍🌾")
         send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente {chat_id} solicitó hablar con un humano o preguntó por precios/costos.")
     else:
+        print("[ACCIÓN] Enviando respuesta normal...")
         send_whatsapp_message(chat_id, reply)
 
     return 'OK', 200
