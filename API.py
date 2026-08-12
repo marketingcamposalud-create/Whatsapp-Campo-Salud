@@ -1,61 +1,66 @@
 import os
 import requests
 from flask import Flask, request
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
 ID_INSTANCE = os.getenv("ID_INSTANCE")
 API_TOKEN_INSTANCE = os.getenv("API_TOKEN_INSTANCE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SUPERVISOR_CHAT_ID = "584128222613@c.us" 
+
+# ==========================================
+# RUTAS DE DEPARTAMENTOS
+# ==========================================
+NUMERO_VENTAS = "584128222613@c.us"
+NUMERO_TECNICO = "584247609075@c.us"
+NUMERO_FACTURACION = "584247157087@c.us" # Se omitió el 0 inicial del 0424 por formato de WhatsApp
 
 chats_pausados = set()
 
-# ==========================================
-# 🛑 MODO PRUEBAS: SOLO RESPONDERÁ A ESTOS NÚMEROS
-# ==========================================
-NUMEROS_PERMITIDOS = [
-    "584128222613@c.us", 
-    "584120326262@c.us"
-]
-
 SYSTEM_PROMPT = """
-Eres el asistente virtual experto de Campo Salud. Tu tono es amable, muy profesional y servicial.
+Eres el asistente virtual experto de Campo Salud. tu nombre es Campo
+REGLA DE ORO (ESTILO):Eres amigable, Eres directo, conciso y extremadamente profesional. Cero texto de relleno. Resuelve dudas simples en una o dos frases cortas.
 
-INFORMACIÓN DE LA EMPRESA:
-- Horario de atención: Trabajamos de Lunes a Viernes de 8:00 AM a 12:00 PM y de 2:00 PM a 5:00 PM.
-- Especialidades agrícolas: Asesoría y productos para cultivos comerciales, especialmente papa, ajo, zanahoria y fresa.
-- Agroquímicos: Manejamos una amplia gama, incluyendo fertilizantes específicos como OMEX NK60 y Potten-T (excelente fuente de potasio).
-- Veterinaria: Insumos ganaderos, alimentación, suplementos (como vitaminas a base de calcio) y organización de jornadas de exámenes de salud animal.
+REGLAS DE NEGOCIO:
+1. PRODUCTOS: NUNCA menciones nombres de marcas comerciales al inicio. Si recomiendas soluciones para los cultivos, habla solo de compuestos (ej. fuentes de potasio, suplementos de calcio, nitrógeno). Solo proporciona marcas si el cliente pregunta directamente por una.
+2. HORARIO: Lunes a Viernes de 8:00 AM a 12:00 PM y de 2:00 PM a 5:00 PM.
+3. FUERA DE HORARIO: Si la "Hora Actual" (indicada abajo) está fuera de este rango, DEBES iniciar tu respuesta diciendo explícitamente que eres el asistente virtual automatizado y que una persona real le responderá su solicitud en el próximo turno laboral.
 
-TUS INSTRUCCIONES ESTRICTAS:
-1. Cuando un cliente salude, NUNCA escales inmediatamente. SIEMPRE debes responder primero con este mensaje:
-   "¡Hola! Bienvenido a Campo Salud 🚜. ¿En qué podemos ayudarte hoy?
-   1️⃣ Agroquímicos y fertilizantes
-   2️⃣ Insumos y veterinaria
-   3️⃣ Consultas técnicas
-   4️⃣ Hablar con un asesor"
-2. Si el cliente hace preguntas generales sobre los cultivos o productos que conoces, ayúdalo con información técnica básica.
-3. Si el cliente pide hablar con un humano o un asesor, infórmale siempre nuestro horario de atención antes de pasarlo con él.
+SISTEMA DE ESCALADO AUTOMÁTICO (ESTRICTO):
+Analiza lo que necesita el cliente. Redacta tu respuesta corta solucionando la duda o saludando (incluyendo la advertencia de fuera de horario si aplica) y al FINAL EXACTO de tu mensaje, DEBES añadir una de estas etiquetas secretas si se requiere atención humana:
 
-CUÁNDO ESCALAR (Usa la palabra exacta ESCALAR_HUMANO en tu respuesta SOLO en estos casos):
-- El cliente pide precios exactos, costos, presupuestos o cotizaciones (no tienes acceso a la lista de precios).
-- El cliente necesita un diagnóstico agronómico o veterinario profundo que requiere la evaluación de un profesional.
+- [ESCALAR_VENTAS] -> Si quieren comprar, piden presupuestos/precios de agroquímicos o veterinaria, o desean hablar con un asesor comercial.
+- [ESCALAR_TECNICO] -> Si hacen consultas agronómicas/veterinarias complejas, piden diagnósticos o buscan asesoría técnica profesional.
+- [ESCALAR_FACTURACION] -> Si hacen preguntas de información privada, facturación, pagos, envíos, o si preguntan cosas que no sabes o están fuera del tema agrícola.
+
+Si puedes responder la duda por ti mismo sin necesidad de un humano, simplemente responde sin añadir ninguna etiqueta.
 """
+
+def get_venezuela_time():
+    tz_ve = timezone(timedelta(hours=-4))
+    return datetime.now(tz_ve)
 
 def send_whatsapp_message(chat_id, text):
     url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/sendMessage/{API_TOKEN_INSTANCE}"
     try:
-        response = requests.post(url, json={"chatId": chat_id, "message": text})
-        print(f"[GREEN API] Mensaje enviado a {chat_id}: Código {response.status_code}")
+        requests.post(url, json={"chatId": chat_id, "message": text})
     except Exception as e:
         print(f"[GREEN API ERROR]: {e}")
 
-def consultar_gemini(texto_usuario):
+def consultar_gemini(texto_usuario, chat_id):
+    now = get_venezuela_time()
+    dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    dia_semana = dias[now.weekday()]
+    hora_str = now.strftime("%I:%M %p")
+    
+    # Se inyecta la hora actual para que el bot sepa si está fuera de horario
+    contexto = f"Día Actual: {dia_semana}\nHora Actual: {hora_str}\nCliente: {texto_usuario}"
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{
-            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nCliente: {texto_usuario}"}]
+            "parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contexto}"}]
         }]
     }
     headers = {'Content-Type': 'application/json'}
@@ -65,11 +70,9 @@ def consultar_gemini(texto_usuario):
         if 'candidates' in datos:
             return datos['candidates'][0]['content']['parts'][0]['text'].strip()
         else:
-            print(f"[GEMINI ERROR]: {datos}")
-            return "ESCALAR_HUMANO"
+            return "[ESCALAR_FACTURACION] Disculpa, tengo inconvenientes técnicos temporales. Te transferiré a administración."
     except Exception as e:
-        print(f"[GEMINI EXCEPCIÓN]: {e}")
-        return "ESCALAR_HUMANO"
+        return "[ESCALAR_FACTURACION] Ocurrió un error. Te pasaré con un asesor en breve."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -81,57 +84,70 @@ def webhook():
     msg_type = body.get('messageData', {}).get('typeMessage')
     is_me = body.get('senderData', {}).get('isMe')
 
+    if is_me:
+        # Comandos de reactivación/pausa manual
+        if msg_type in ['textMessage', 'extendedTextMessage']:
+            text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or \
+                   body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
+            if text.strip() == '/bot on': 
+                chats_pausados.discard(chat_id)
+            elif text.strip() == '/bot off': 
+                chats_pausados.add(chat_id)
+        return 'OK', 200
+
+    if chat_id in chats_pausados: 
+        return 'OK', 200
+
+    # Procesar tiempo para las notificaciones
+    now = get_venezuela_time()
+    hora_str = now.strftime("%I:%M %p")
+    num_cliente = chat_id.split('@')[0]
+
+    # REGLA: FOTOS O ARCHIVOS DIRECTO A FACTURACIÓN (SEGÚN TUS INSTRUCCIONES)
+    if msg_type not in ['textMessage', 'extendedTextMessage']:
+        chats_pausados.add(chat_id)
+        send_whatsapp_message(chat_id, "He recibido tu archivo. Una persona real lo revisará y te responderá en breve.")
+        alerta = f"🔔 ALERTA DE ARCHIVO\n📞 Cliente: {num_cliente}\n⏰ Hora: {hora_str}\n🎯 Motivo: Envió documento, foto o audio."
+        send_whatsapp_message(NUMERO_FACTURACION, alerta)
+        return 'OK', 200
+
+    # Procesamiento de Texto
     if msg_type == 'textMessage':
         text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
     elif msg_type == 'extendedTextMessage':
         text = body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
-    else:
-        text = ""
 
-    # --- LOS CHIVATOS ---
-    print(f"\n====================================")
-    print(f"[NUEVO MENSAJE] De: {chat_id} | Es mío: {is_me}")
-    print(f"[TEXTO]: {text}")
-
-    # EL ESCUDO
-    if chat_id not in NUMEROS_PERMITIDOS and not is_me:
-        print(f"[BLOQUEADO POR ESCUDO] El número {chat_id} no está en la lista VIP.")
-        return 'OK', 200
+    print(f"[NUEVO MENSAJE] {num_cliente}: {text}")
+    reply = consultar_gemini(text, chat_id)
     
-    print(f"[PERMITIDO] El número {chat_id} pasó el escudo de pruebas.")
+    destino_alerta = None
+    motivo_alerta = ""
 
-    if is_me:
-        if text.strip() == '/bot on': 
-            chats_pausados.discard(chat_id)
-            print(f"[BOT REACTIVADO] para el chat {chat_id}")
-        elif text.strip() == '/bot off': 
-            chats_pausados.add(chat_id)
-            print(f"[BOT PAUSADO] para el chat {chat_id}")
-        return 'OK', 200
+    # LÓGICA DE ENRUTAMIENTO (Se filtra la etiqueta para que el cliente no la vea)
+    if "[ESCALAR_VENTAS]" in reply:
+        destino_alerta = NUMERO_VENTAS
+        motivo_alerta = "Atención Comercial / Ventas"
+        reply = reply.replace("[ESCALAR_VENTAS]", "").strip()
+    elif "[ESCALAR_TECNICO]" in reply:
+        destino_alerta = NUMERO_TECNICO
+        motivo_alerta = "Consulta Técnica / Agronómica"
+        reply = reply.replace("[ESCALAR_TECNICO]", "").strip()
+    elif "[ESCALAR_FACTURACION]" in reply:
+        destino_alerta = NUMERO_FACTURACION
+        motivo_alerta = "Facturación / Información Privada"
+        reply = reply.replace("[ESCALAR_FACTURACION]", "").strip()
 
-    if chat_id in chats_pausados: 
-        print(f"[IGNORADO] El chat {chat_id} está pausado, esperando al humano.")
-        return 'OK', 200
-
-    if msg_type not in ['textMessage', 'extendedTextMessage']:
-        print("[ESCALADO AUTO] El cliente envió un archivo.")
-        chats_pausados.add(chat_id)
-        send_whatsapp_message(chat_id, "He recibido tu archivo. Un asesor de Campo Salud te contactará pronto. 🧑‍🌾")
-        send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente de prueba {chat_id} envió un archivo.")
-        return 'OK', 200
-
-    print("[CONSULTANDO A GEMINI...]")
-    reply = consultar_gemini(text)
-    print("[RESPUESTA DE GEMINI LISTA]")
-
-    if "ESCALAR_HUMANO" in reply:
-        print("[ACCIÓN] Gemini decidió escalar al humano.")
-        chats_pausados.add(chat_id)
-        send_whatsapp_message(chat_id, "Claro, te pondré en contacto con un asesor de Campo Salud. Aguarda un momento... 🧑‍🌾")
-        send_whatsapp_message(SUPERVISOR_CHAT_ID, f"🔔 ALERTA: El cliente de prueba {chat_id} requiere atención.")
-    else:
-        print("[ACCIÓN] Enviando respuesta automática...")
+    # Se envía el mensaje limpio al cliente
+    if reply:
         send_whatsapp_message(chat_id, reply)
+
+    # Si se activó alguna ruta de escalado, se pausa al bot y se envía la notificación completa
+    if destino_alerta:
+        chats_pausados.add(chat_id)
+        # Recortamos el mensaje para que no sature la alerta si es muy largo
+        texto_recortado = text[:150] + "..." if len(text) > 150 else text
+        alerta_formateada = f"🔔 ASISTENCIA REQUERIDA\n📞 Cliente: {num_cliente}\n⏰ Hora: {hora_str}\n🎯 Departamento: {motivo_alerta}\n💬 Último mensaje: '{texto_recortado}'"
+        send_whatsapp_message(destino_alerta, alerta_formateada)
 
     return 'OK', 200
 
