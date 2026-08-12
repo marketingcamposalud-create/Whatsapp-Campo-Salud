@@ -10,17 +10,25 @@ API_TOKEN_INSTANCE = os.getenv("API_TOKEN_INSTANCE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ==========================================
+# 🛑 MODO PRUEBAS: SOLO RESPONDERÁ A ESTOS NÚMEROS
+# ==========================================
+NUMEROS_PERMITIDOS = [
+    "584120326262@c.us",
+    "584147178563@c.us"
+]
+
+# ==========================================
 # RUTAS DE DEPARTAMENTOS
 # ==========================================
 NUMERO_VENTAS = "584128222613@c.us"
 NUMERO_TECNICO = "584247609075@c.us"
-NUMERO_FACTURACION = "584247157087@c.us" # Se omitió el 0 inicial del 0424 por formato de WhatsApp
+NUMERO_FACTURACION = "584247157087@c.us"
 
 chats_pausados = set()
 
 SYSTEM_PROMPT = """
-Eres el asistente virtual experto de Campo Salud. tu nombre es Campo
-REGLA DE ORO (ESTILO):Eres amigable, Eres directo, conciso y extremadamente profesional. Cero texto de relleno. Resuelve dudas simples en una o dos frases cortas.
+Eres el asistente virtual experto de Campo Salud.
+REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno. Resuelve dudas simples en una o dos frases cortas.
 
 REGLAS DE NEGOCIO:
 1. PRODUCTOS: NUNCA menciones nombres de marcas comerciales al inicio. Si recomiendas soluciones para los cultivos, habla solo de compuestos (ej. fuentes de potasio, suplementos de calcio, nitrógeno). Solo proporciona marcas si el cliente pregunta directamente por una.
@@ -54,7 +62,6 @@ def consultar_gemini(texto_usuario, chat_id):
     dia_semana = dias[now.weekday()]
     hora_str = now.strftime("%I:%M %p")
     
-    # Se inyecta la hora actual para que el bot sepa si está fuera de horario
     contexto = f"Día Actual: {dia_semana}\nHora Actual: {hora_str}\nCliente: {texto_usuario}"
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
@@ -84,8 +91,16 @@ def webhook():
     msg_type = body.get('messageData', {}).get('typeMessage')
     is_me = body.get('senderData', {}).get('isMe')
 
+    # ==========================================
+    # 🛑 EL ESCUDO VIP EN ACCIÓN
+    # ==========================================
+    if chat_id not in NUMEROS_PERMITIDOS and not is_me:
+        print(f"[BLOQUEADO POR ESCUDO] El número {chat_id} fue ignorado.")
+        return 'OK', 200
+    
+    print(f"[PERMITIDO] El número {chat_id} pasó el escudo de pruebas.")
+
     if is_me:
-        # Comandos de reactivación/pausa manual
         if msg_type in ['textMessage', 'extendedTextMessage']:
             text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or \
                    body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
@@ -98,12 +113,10 @@ def webhook():
     if chat_id in chats_pausados: 
         return 'OK', 200
 
-    # Procesar tiempo para las notificaciones
     now = get_venezuela_time()
     hora_str = now.strftime("%I:%M %p")
     num_cliente = chat_id.split('@')[0]
 
-    # REGLA: FOTOS O ARCHIVOS DIRECTO A FACTURACIÓN (SEGÚN TUS INSTRUCCIONES)
     if msg_type not in ['textMessage', 'extendedTextMessage']:
         chats_pausados.add(chat_id)
         send_whatsapp_message(chat_id, "He recibido tu archivo. Una persona real lo revisará y te responderá en breve.")
@@ -111,7 +124,6 @@ def webhook():
         send_whatsapp_message(NUMERO_FACTURACION, alerta)
         return 'OK', 200
 
-    # Procesamiento de Texto
     if msg_type == 'textMessage':
         text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
     elif msg_type == 'extendedTextMessage':
@@ -123,7 +135,6 @@ def webhook():
     destino_alerta = None
     motivo_alerta = ""
 
-    # LÓGICA DE ENRUTAMIENTO (Se filtra la etiqueta para que el cliente no la vea)
     if "[ESCALAR_VENTAS]" in reply:
         destino_alerta = NUMERO_VENTAS
         motivo_alerta = "Atención Comercial / Ventas"
@@ -137,14 +148,11 @@ def webhook():
         motivo_alerta = "Facturación / Información Privada"
         reply = reply.replace("[ESCALAR_FACTURACION]", "").strip()
 
-    # Se envía el mensaje limpio al cliente
     if reply:
         send_whatsapp_message(chat_id, reply)
 
-    # Si se activó alguna ruta de escalado, se pausa al bot y se envía la notificación completa
     if destino_alerta:
         chats_pausados.add(chat_id)
-        # Recortamos el mensaje para que no sature la alerta si es muy largo
         texto_recortado = text[:150] + "..." if len(text) > 150 else text
         alerta_formateada = f"🔔 ASISTENCIA REQUERIDA\n📞 Cliente: {num_cliente}\n⏰ Hora: {hora_str}\n🎯 Departamento: {motivo_alerta}\n💬 Último mensaje: '{texto_recortado}'"
         send_whatsapp_message(destino_alerta, alerta_formateada)
