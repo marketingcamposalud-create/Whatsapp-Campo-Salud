@@ -20,17 +20,18 @@ NUMERO_FACTURACION = "584247157087@c.us"
 chats_pausados = {}
 
 SYSTEM_PROMPT = """
-Eres el asistente virtual experto de Campo Salud.
-REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno. Resuelve dudas simples.
+Eres "Campo", el asistente virtual experto de la empresa Campo Salud, ubicada en Mucuchíes.
+REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno.
+CAPACIDAD: Debes ser capaz de responder eficientemente preguntas simples y complejas sobre agronomía y veterinaria.
 REGLAS DE NEGOCIO:
-1. PRODUCTOS Y CALIDAD: Para la agronomía, especialmente en cultivos de ajos, papas, zanahoria y fresas, debes brindar recomendaciones certeras y priorizar el manejo ideal.
-2. FORMULACIONES: Prescribe soluciones basadas en formulaciones exactas, recordando que utilizamos insumos como OMEX NK 60 (con 8.4% de nitrógeno) y Byo-K 40.
+1. PRODUCTOS Y CALIDAD: Brinda recomendaciones técnicas certeras priorizando la calidad y el manejo ideal para cultivos (ajo, papa, zanahoria, fresas). 
+2. FORMULACIONES: Basa tus recomendaciones agronómicas en formulaciones exactas, recordando que utilizamos insumos como OMEX NK 60 (con 8.4% de nitrógeno), Byo-K 40 y Potten-T para el manejo nutricional y fitosanitario.
 SISTEMA DE ESCALADO AUTOMÁTICO (ESTRICTO):
-Analiza lo que necesita el cliente. Redacta tu respuesta solucionando la duda, y si es necesario, AÑADE UNA SOLA ETIQUETA al final:
-[ESCALAR_VENTAS] -> Si quieren comprar, piden presupuestos/precios.
-[ESCALAR_TECNICO] -> Si hacen consultas agronómicas complejas (ej. diagnósticos de nematodos), o buscan asesoría técnica de cultivos.
-[ESCALAR_FACTURACION] -> Si hacen preguntas de información privada o pagos.
-Si puedes responder la duda por ti mismo de forma certera sin necesidad de un humano, simplemente responde sin añadir ninguna etiqueta.
+Analiza lo que necesita el cliente. Redacta tu respuesta solucionando la duda de forma técnica y veraz. Si puedes dar la mejor solución técnica por ti mismo (ej. control de nematodos), responde directamente SIN añadir ninguna etiqueta.
+Solo si NO tienes la información o el cliente requiere interacción humana obligatoria, AÑADE UNA SOLA ETIQUETA al final:
+[ESCALAR_VENTAS] -> Si piden presupuestos directos o precios.
+[ESCALAR_TECNICO] -> Si la consulta sobrepasa tus capacidades y requiere un ingeniero.
+[ESCALAR_FACTURACION] -> Si hacen preguntas de pagos o información privada.
 """
 
 def get_venezuela_time():
@@ -44,12 +45,8 @@ def send_whatsapp_message(chat_id, text):
         print(f"[GREEN API ERROR]: No se pudo enviar el mensaje a {chat_id}. Detalle: {e}", flush=True)
 
 def procesar_gemini_y_responder(chat_id, texto_usuario):
-    """Esta función se ejecuta en segundo plano, protegiendo al servidor de colapsos."""
     print(f"\n[INICIANDO HILO] Analizando solicitud técnica de {chat_id}...", flush=True)
     
-    # Enviar mensaje de "Estoy procesando"
-    send_whatsapp_message(chat_id, "Analizando tu solicitud, dame un segundo...")
-
     now = get_venezuela_time()
     hora_str = now.strftime("%I:%M %p")
     contexto = f"Hora Actual: {hora_str}\nCliente: {texto_usuario}"
@@ -63,8 +60,8 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
     headers = {'Content-Type': 'application/json'}
 
     try:
-        # Timeout amplio (35s) porque el hilo asíncrono evita que Render intervenga
-        response = requests.post(url, headers=headers, json=payload, timeout=35)
+        # Límite de tiempo aumentado a 90 segundos para procesar consultas complejas sin cortar la conexión
+        response = requests.post(url, headers=headers, json=payload, timeout=90)
         datos = response.json()
 
         if 'candidates' in datos:
@@ -81,16 +78,16 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
                 reply_limpia = reply.replace("[ESCALAR_VENTAS]", "").replace("[ESCALAR_TECNICO]", "").replace("[ESCALAR_FACTURACION]", "").strip()
                 send_whatsapp_message(chat_id, reply_limpia)
                 send_whatsapp_message(destino, f"⚠️ ASISTENCIA TÉCNICA REQUERIDA\n👤 Cliente: {chat_id.split('@')[0]}\n📋 Respuesta previa: {reply_limpia}")
-                print(f"[BOT PAUSADO] Escalado ejecutado correctamente hacia el departamento designado.", flush=True)
+                print(f"[BOT PAUSADO] Escalado ejecutado correctamente.", flush=True)
             else:
                 send_whatsapp_message(chat_id, reply)
         else:
-            print(f"[GEMINI ERROR INTERNO - API DE GOOGLE]: {datos}", flush=True)
+            print(f"[GEMINI ERROR INTERNO]: {datos}", flush=True)
             send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes técnicos procesando el diagnóstico. Te transferiré a un asesor.")
             send_whatsapp_message(NUMERO_TECNICO, f"⚠️ ALERTA: Fallo en IA con el cliente {chat_id.split('@')[0]}")
     except Exception as e:
         print(f"[ERROR DE CONEXIÓN EN HILO]: {e}", flush=True)
-        send_whatsapp_message(chat_id, "Ocurrió un error de conexión en la red. Te pasaré con un asesor en breve.")
+        send_whatsapp_message(chat_id, "Ocurrió un error de conexión procesando la información. Te pasaré con un asesor en breve.")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -107,7 +104,7 @@ def webhook():
         if chat_id not in NUMEROS_PERMITIDOS and not is_me:
             return 'OK', 200
 
-        # GESTIÓN DE CONTROL MANUAL Y GATILLOS DE CIERRE NATURAL
+        # GESTIÓN DE CONTROL MANUAL Y GATILLOS
         if is_me:
             text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or \
                    body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
@@ -135,14 +132,13 @@ def webhook():
             else:
                 return 'OK', 200
 
-        # EXTRACCIÓN ROBUSTA DE TEXTO (Soporta formatos normales y extendidos)
+        # EXTRACCIÓN ROBUSTA DE TEXTO
         texto_usuario = ""
         if msg_type == 'textMessage':
             texto_usuario = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
         elif msg_type == 'extendedTextMessage':
             texto_usuario = body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
 
-        # FILTRO DE ARCHIVOS Y MULTIMEDIA
         if msg_type not in ['textMessage', 'extendedTextMessage'] or not texto_usuario.strip():
             chats_pausados[chat_id] = now
             send_whatsapp_message(chat_id, "He recibido tu archivo multimedia. Un técnico real lo revisará y te responderá en breve.")
@@ -152,15 +148,14 @@ def webhook():
         print(f"\n====================================", flush=True)
         print(f"[NUEVO MENSAJE] {chat_id.split('@')[0]}: {texto_usuario}", flush=True)
 
-        # DESPLIEGUE DEL HILO ASÍNCRONO
+        # DESPLIEGUE DEL HILO ASÍNCRONO SIN MENSAJE INTERMEDIO
         hilo = threading.Thread(target=procesar_gemini_y_responder, args=(chat_id, texto_usuario))
         hilo.start()
 
-        # Render recibe confirmación en 0.1s. Adiós a los colapsos.
         return 'OK', 200
 
     except Exception as e:
-        print(f"[CRITICAL WEBHOOK ERROR]: Falla estructural en el código principal: {e}", flush=True)
+        print(f"[CRITICAL WEBHOOK ERROR]: {e}", flush=True)
         return 'OK', 200
 
 if __name__ == '__main__':
