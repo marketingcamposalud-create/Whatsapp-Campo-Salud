@@ -10,11 +10,12 @@ API_TOKEN_INSTANCE = os.getenv("API_TOKEN_INSTANCE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ==========================================
-# MODO PRUEBAS: SOLO RESPONDERÁ A ESTOS NÚMEROS
+# 🛑 MODO PRUEBAS VIP
 # ==========================================
 NUMEROS_PERMITIDOS = [
     "584120326262@c.us",
-    "584147178563@c.us"
+    "584147178563@c.us",
+    "584128222613@c.us" # ¡Nuevo número agregado!
 ]
 
 # RUTAS DE DEPARTAMENTOS
@@ -22,7 +23,8 @@ NUMERO_VENTAS = "584128222613@c.us"
 NUMERO_TECNICO = "584247609075@c.us"
 NUMERO_FACTURACION = "584247157087@c.us"
 
-chats_pausados = set()
+# Ahora es un diccionario para guardar la hora exacta en la que se pausó
+chats_pausados = {}
 
 SYSTEM_PROMPT = """
 Eres el asistente virtual experto de Campo Salud.
@@ -47,7 +49,6 @@ def get_venezuela_time():
     return datetime.now(tz_ve)
 
 def send_whatsapp_message(chat_id, text):
-    # ¡ERROR CORREGIDO AQUÍ! Se restablecieron las llaves {}
     url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/sendMessage/{API_TOKEN_INSTANCE}"
     try:
         response = requests.post(url, json={"chatId": chat_id, "message": text})
@@ -59,10 +60,11 @@ def consultar_gemini(texto_usuario, chat_id):
     now = get_venezuela_time()
     dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
     dia_semana = dias[now.weekday()]
-    # ¡ERROR CORREGIDO AQUÍ! Formato de hora validado.
     hora_str = now.strftime("%I:%M %p")
 
     contexto = f"Día Actual: {dia_semana}\nHora Actual: {hora_str}\nCliente: {texto_usuario}"
+    
+    # ¡AQUÍ ESTÁ TU MODELO PREMIUM! (Adiós al error 503)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
@@ -95,6 +97,8 @@ def webhook():
     chat_id = body.get('senderData', {}).get('chatId')
     msg_type = body.get('messageData', {}).get('typeMessage')
     is_me = body.get('senderData', {}).get('isMe')
+    now = get_venezuela_time()
+    hora_str = now.strftime("%I:%M %p")
 
     # ==========================================
     # EL ESCUDO VIP EN ACCIÓN
@@ -103,31 +107,46 @@ def webhook():
         print(f"[BLOQUEADO POR ESCUDO] El número {chat_id} fue ignorado.")
         return 'OK', 200
 
-    print(f"[PERMITIDO] El número {chat_id} pasó el escudo de pruebas.")
+    if not is_me:
+        print(f"[PERMITIDO] El número {chat_id} pasó el escudo de pruebas.")
 
+    # ==========================================
+    # CONTROL MANUAL OPCIONAL (/bot on - /bot off)
+    # ==========================================
     if is_me:
         if msg_type in ['textMessage', 'extendedTextMessage']:
             text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or \
                    body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
             if text.strip() == '/bot on':
-                chats_pausados.discard(chat_id)
-                print(f"[BOT REACTIVADO] para el chat {chat_id}")
+                chats_pausados.pop(chat_id, None)
+                print(f"[BOT REACTIVADO MANUALMENTE] para el chat {chat_id}")
             elif text.strip() == '/bot off':
-                chats_pausados.add(chat_id)
-                print(f"[BOT PAUSADO] para el chat {chat_id}")
+                chats_pausados[chat_id] = now
+                print(f"[BOT PAUSADO MANUALMENTE] para el chat {chat_id}")
         return 'OK', 200
 
+    # ==========================================
+    # EL CRONÓMETRO AUTOMÁTICO DE 2 HORAS
+    # ==========================================
     if chat_id in chats_pausados:
-        print(f"[IGNORADO] El chat {chat_id} está pausado, esperando al humano.")
-        return 'OK', 200
+        tiempo_pausado = chats_pausados[chat_id]
+        diferencia = now - tiempo_pausado
+        
+        if diferencia >= timedelta(hours=2):
+            # Si pasaron 2 horas, se borra de la lista de pausados
+            chats_pausados.pop(chat_id, None)
+            print(f"[REINICIO AUTOMÁTICO] Pasaron más de 2 horas. Reactivando bot para {chat_id}")
+        else:
+            # Si no han pasado 2 horas, sigue ignorando
+            print(f"[IGNORADO] El chat {chat_id} sigue en pausa temporal (Esperando al humano).")
+            return 'OK', 200
 
-    now = get_venezuela_time()
-    hora_str = now.strftime("%I:%M %p")
     num_cliente = chat_id.split('@')[0]
 
+    # REGLA PARA ARCHIVOS (Pausa inmediata)
     if msg_type not in ['textMessage', 'extendedTextMessage']:
         print("[ESCALADO AUTO] El cliente envió un archivo.")
-        chats_pausados.add(chat_id)
+        chats_pausados[chat_id] = now # Inicia el cronómetro
         send_whatsapp_message(chat_id, "He recibido tu archivo. Una persona real lo revisará y te responderá en breve.")
         alerta = f"🚨 ALERTA DE ARCHIVO\n👤 Cliente: {num_cliente}\n🕒 Hora: {hora_str}\n📁 Motivo: Envió documento, foto o audio."
         send_whatsapp_message(NUMERO_FACTURACION, alerta)
@@ -164,7 +183,7 @@ def webhook():
         send_whatsapp_message(chat_id, reply)
 
     if destino_alerta:
-        chats_pausados.add(chat_id)
+        chats_pausados[chat_id] = now # Inicia el cronómetro al escalar
         print(f"[ACCIÓN] Bot pausado. Transfiriendo a {motivo_alerta}...")
         alerta_formateada = f"⚠️ ASISTENCIA REQUERIDA\n👤 Cliente: {num_cliente}\n🕒 Hora: {hora_str}\n🏢 Departamento: {motivo_alerta}"
         send_whatsapp_message(destino_alerta, alerta_formateada)
