@@ -48,9 +48,13 @@ def get_venezuela_time():
 def send_whatsapp_message(chat_id, text):
     url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/sendMessage/{API_TOKEN_INSTANCE}"
     try:
-        requests.post(url, json={"chatId": chat_id, "message": text}, timeout=10)
+        response = requests.post(url, json={"chatId": chat_id, "message": text}, timeout=10)
+        if response.status_code != 200:
+            print(f"[GREEN API RECHAZO] Código: {response.status_code} - Destino: {chat_id}", flush=True)
+        else:
+            print(f"[GREEN API ÉXITO] Mensaje entregado a {chat_id}", flush=True)
     except Exception as e:
-        print(f"[GREEN API ERROR]: No se pudo enviar el mensaje a {chat_id}. Detalle: {e}", flush=True)
+        print(f"[GREEN API ERROR DE RED]: No se pudo conectar. Detalle: {e}", flush=True)
 
 # ==========================================
 # HILO DE PROCESAMIENTO ASÍNCRONO
