@@ -65,7 +65,7 @@ def consultar_gemini(texto_usuario, chat_id):
     contexto = f"Día Actual: {dia_semana}\nHora Actual: {hora_str}\nCliente: {texto_usuario}"
     
     # ¡AQUÍ ESTÁ TU MODELO PREMIUM! (Adiós al error 503)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
         "contents": [{
