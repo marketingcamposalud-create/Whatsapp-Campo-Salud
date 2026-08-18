@@ -1,17 +1,22 @@
 import os
 import requests
 import threading
+import time
 from flask import Flask, request
 from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
+# ==========================================
 # CREDENCIALES
+# ==========================================
 ID_INSTANCE = os.getenv("ID_INSTANCE")
 API_TOKEN_INSTANCE = os.getenv("API_TOKEN_INSTANCE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# RUTAS DE DEPARTAMENTOS
+# ==========================================
+# RUTAS DE DEPARTAMENTOS Y PERMISOS
+# ==========================================
 NUMEROS_PERMITIDOS = ["584120326262@c.us", "584147178563@c.us", "584128222613@c.us"]
 NUMERO_VENTAS = "584128222613@c.us"
 NUMERO_TECNICO = "584247609075@c.us"
@@ -19,15 +24,18 @@ NUMERO_FACTURACION = "584247157087@c.us"
 
 chats_pausados = {}
 
+# ==========================================
+# CEREBRO DEL BOT (IDENTIDAD Y REGLAS)
+# ==========================================
 SYSTEM_PROMPT = """
 Eres "Campo", el asistente virtual experto de la empresa Campo Salud, ubicada en Mucuchíes.
 REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno.
 CAPACIDAD: Debes ser capaz de responder eficientemente preguntas simples y complejas sobre agronomía y veterinaria.
 REGLAS DE NEGOCIO:
 1. PRODUCTOS Y CALIDAD: Brinda recomendaciones técnicas certeras priorizando la calidad y el manejo ideal para cultivos (ajo, papa, zanahoria, fresas). 
-2. FORMULACIONES: Basa tus recomendaciones agronómicas en formulaciones exactas, manejo nutricional y fitosanitario.
+2. FORMULACIONES: Basa tus recomendaciones agronómicas en formulaciones exactas, recordando que utilizamos insumos como OMEX NK 60 (con 8.4% de nitrógeno), Byo-K 40 y Potten-T para el manejo nutricional y fitosanitario.
 SISTEMA DE ESCALADO AUTOMÁTICO (ESTRICTO):
-Analiza lo que necesita el cliente. Redacta tu respuesta solucionando la duda de forma técnica y veraz. Si puedes dar la mejor solución técnica por ti mismo (ej. control de nematodos), responde directamente SIN añadir ninguna etiqueta.
+Analiza lo que necesita el cliente. Redacta tu respuesta solucionando la duda de forma técnica y veraz. Si puedes dar la mejor solución técnica por ti mismo (ej. control de nematodos o mosca blanca), responde directamente SIN añadir ninguna etiqueta.
 Solo si NO tienes la información o el cliente requiere interacción humana obligatoria, AÑADE UNA SOLA ETIQUETA al final:
 [ESCALAR_VENTAS] -> Si piden presupuestos directos o precios.
 [ESCALAR_TECNICO] -> Si la consulta sobrepasa tus capacidades y requiere un ingeniero.
@@ -44,6 +52,9 @@ def send_whatsapp_message(chat_id, text):
     except Exception as e:
         print(f"[GREEN API ERROR]: No se pudo enviar el mensaje a {chat_id}. Detalle: {e}", flush=True)
 
+# ==========================================
+# HILO DE PROCESAMIENTO ASÍNCRONO
+# ==========================================
 def procesar_gemini_y_responder(chat_id, texto_usuario):
     print(f"\n[INICIANDO HILO] Analizando solicitud técnica de {chat_id}...", flush=True)
     
@@ -59,36 +70,58 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
     }
     headers = {'Content-Type': 'application/json'}
 
-    try:
-        # Límite de tiempo aumentado a 90 segundos para procesar consultas complejas sin cortar la conexión
-        response = requests.post(url, headers=headers, json=payload, timeout=90)
-        datos = response.json()
+    intentos_maximos = 3
+    
+    for intento in range(intentos_maximos):
+        try:
+            # Límite de 90 segundos por intento
+            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            datos = response.json()
 
-        if 'candidates' in datos:
-            reply = datos['candidates'][0]['content']['parts'][0]['text'].strip()
-            print("[RESPUESTA DE GEMINI PROCESADA CON ÉXITO]", flush=True)
+            # Evaluar si Google arrojó un error 503 por saturación
+            if 'error' in datos and datos['error'].get('code') == 503:
+                print(f"[ADVERTENCIA] Google saturado (Error 503). Reintento silencioso {intento + 1}/{intentos_maximos} en progreso...", flush=True)
+                time.sleep(2)  # Espera 2 segundos antes de volver a intentar
+                continue
 
-            destino = None
-            if "[ESCALAR_VENTAS]" in reply: destino = NUMERO_VENTAS
-            elif "[ESCALAR_TECNICO]" in reply: destino = NUMERO_TECNICO
-            elif "[ESCALAR_FACTURACION]" in reply: destino = NUMERO_FACTURACION
+            # Evaluar si la respuesta fue exitosa
+            if 'candidates' in datos:
+                reply = datos['candidates'][0]['content']['parts'][0]['text'].strip()
+                print("[RESPUESTA DE GEMINI PROCESADA CON ÉXITO]", flush=True)
 
-            if destino:
-                chats_pausados[chat_id] = now
-                reply_limpia = reply.replace("[ESCALAR_VENTAS]", "").replace("[ESCALAR_TECNICO]", "").replace("[ESCALAR_FACTURACION]", "").strip()
-                send_whatsapp_message(chat_id, reply_limpia)
-                send_whatsapp_message(destino, f"⚠️ ASISTENCIA TÉCNICA REQUERIDA\n👤 Cliente: {chat_id.split('@')[0]}\n📋 Respuesta previa: {reply_limpia}")
-                print(f"[BOT PAUSADO] Escalado ejecutado correctamente.", flush=True)
-            else:
-                send_whatsapp_message(chat_id, reply)
-        else:
+                destino = None
+                if "[ESCALAR_VENTAS]" in reply: destino = NUMERO_VENTAS
+                elif "[ESCALAR_TECNICO]" in reply: destino = NUMERO_TECNICO
+                elif "[ESCALAR_FACTURACION]" in reply: destino = NUMERO_FACTURACION
+
+                if destino:
+                    chats_pausados[chat_id] = now
+                    reply_limpia = reply.replace("[ESCALAR_VENTAS]", "").replace("[ESCALAR_TECNICO]", "").replace("[ESCALAR_FACTURACION]", "").strip()
+                    send_whatsapp_message(chat_id, reply_limpia)
+                    send_whatsapp_message(destino, f"⚠️ ASISTENCIA TÉCNICA REQUERIDA\n👤 Cliente: {chat_id.split('@')[0]}\n📋 Respuesta previa: {reply_limpia}")
+                    print(f"[BOT PAUSADO] Escalado ejecutado correctamente.", flush=True)
+                else:
+                    send_whatsapp_message(chat_id, reply)
+                
+                return # Salir de la función al obtener éxito
+
+            # Si hay un error distinto al 503 (ej. llave inválida o modelo no encontrado), rompe el ciclo
             print(f"[GEMINI ERROR INTERNO]: {datos}", flush=True)
-            send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes técnicos procesando el diagnóstico. Te transferiré a un asesor.")
-            send_whatsapp_message(NUMERO_TECNICO, f"⚠️ ALERTA: Fallo en IA con el cliente {chat_id.split('@')[0]}")
-    except Exception as e:
-        print(f"[ERROR DE CONEXIÓN EN HILO]: {e}", flush=True)
-        send_whatsapp_message(chat_id, "Ocurrió un error de conexión procesando la información. Te pasaré con un asesor en breve.")
+            break 
 
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR DE RED] Falla en el intento {intento + 1}: {e}", flush=True)
+            time.sleep(2) # Espera antes de reintentar si hay una caída de conexión
+            continue
+
+    # Si se agotan los reintentos sin éxito:
+    print("[ERROR CRÍTICO] Se agotaron los reintentos. Transfiriendo a un humano.", flush=True)
+    send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes técnicos procesando el diagnóstico debido a la alta demanda. Te transferiré a un asesor.")
+    send_whatsapp_message(NUMERO_TECNICO, f"⚠️ ALERTA: Fallo de conexión IA con el cliente {chat_id.split('@')[0]}")
+
+# ==========================================
+# RUTA WEBHOOK
+# ==========================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
