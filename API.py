@@ -63,7 +63,7 @@ def consultar_gemini(texto_usuario, chat_id):
     hora_str = now.strftime("%I:%M %p")
 
     contexto = f"Día Actual: {dia_semana}\nHora Actual: {hora_str}\nCliente: {texto_usuario}"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
         "contents": [{
