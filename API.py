@@ -2,6 +2,8 @@ import os
 import requests
 import threading
 import time
+import json
+import gspread
 from flask import Flask, request
 from datetime import datetime, timezone, timedelta
 
@@ -25,21 +27,25 @@ NUMERO_FACTURACION = "584247157087@c.us"
 chats_pausados = {}
 
 # ==========================================
-# CEREBRO DEL BOT (IDENTIDAD Y REGLAS)
+# CEREBRO DEL BOT E INVENTARIO
 # ==========================================
 SYSTEM_PROMPT = """
 Eres "Campo", el asistente virtual experto de la empresa Campo Salud, ubicada en Mucuchíes.
 REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno.
-CAPACIDAD: Debes ser capaz de responder eficientemente preguntas simples y complejas sobre agronomía y veterinaria.
-REGLAS DE NEGOCIO:
-1. PRODUCTOS Y CALIDAD: Brinda recomendaciones técnicas certeras priorizando la calidad y el manejo ideal para cultivos (ajo, papa, zanahoria, fresas). 
-2. FORMULACIONES: Basa tus recomendaciones agronómicas en formulaciones exactas, recordando que utilizamos insumos como OMEX NK 60 (con 8.4% de nitrógeno), Byo-K 40 y Potten-T para el manejo nutricional y fitosanitario.
+CAPACIDAD: Responde dudas agronómicas, veterinarias y proporciona precios y disponibilidad de inventario.
+
+REGLAS DE INVENTARIO Y VENTAS:
+1. Siempre revisa la "BASE DE DATOS" que se te proporciona dinámicamente en el contexto antes de dar un precio o confirmar disponibilidad.
+2. Si un producto está con Stock "Agotado", infórmalo amablemente, no inventes precios ni intentes venderlo.
+3. Si el cliente pide un producto que NO está en la base de datos, no especules. Escala la consulta a ventas.
+4. Basa tus recomendaciones agronómicas en formulaciones exactas, recordando que utilizamos insumos como OMEX NK 60 (con 8.4% de nitrógeno), Byo-K 40 y Potten-T para el manejo nutricional y fitosanitario.
+
 SISTEMA DE ESCALADO AUTOMÁTICO (ESTRICTO):
-Analiza lo que necesita el cliente. Redacta tu respuesta solucionando la duda de forma técnica y veraz. Si puedes dar la mejor solución técnica por ti mismo (ej. control de nematodos o mosca blanca), responde directamente SIN añadir ninguna etiqueta.
-Solo si NO tienes la información o el cliente requiere interacción humana obligatoria, AÑADE UNA SOLA ETIQUETA al final:
-[ESCALAR_VENTAS] -> Si piden presupuestos directos o precios.
-[ESCALAR_TECNICO] -> Si la consulta sobrepasa tus capacidades y requiere un ingeniero.
-[ESCALAR_FACTURACION] -> Si hacen preguntas de pagos o información privada.
+Si puedes dar la solución técnica o el precio por ti mismo, responde directamente SIN añadir ninguna etiqueta.
+Si debes escalar, AÑADE UNA SOLA ETIQUETA al final:
+[ESCALAR_VENTAS] -> Si piden cotizaciones por volumen alto, productos no listados, o desean concretar el pago.
+[ESCALAR_TECNICO] -> Si la consulta requiere un diagnóstico avanzado de un ingeniero.
+[ESCALAR_FACTURACION] -> Si hacen preguntas de envíos o facturación previa.
 """
 
 def get_venezuela_time():
@@ -56,15 +62,54 @@ def send_whatsapp_message(chat_id, text):
     except Exception as e:
         print(f"[GREEN API ERROR DE RED]: No se pudo conectar. Detalle: {e}", flush=True)
 
-# ==========================================
-# HILO DE PROCESAMIENTO ASÍNCRONO
-# ==========================================
+def obtener_inventario_sheets():
+    """Conecta con Google Sheets, descarga el inventario en tiempo real y lo formatea."""
+    try:
+        credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
+        gc = gspread.service_account_from_dict(credenciales_json)
+        
+        # El nombre debe coincidir exactamente con el título de tu archivo en Google Drive
+        sh = gc.open("Inventario Campo Salud")
+        hoja = sh.sheet1
+        registros = hoja.get_all_records()
+        
+        lineas_inventario = ["=== BASE DE DATOS: PRECIOS Y DISPONIBILIDAD ==="]
+        
+        for fila in registros:
+            # Busca exactamente la columna 'Descripción'
+            producto = str(fila.get("Descripción", "")).strip()
+            
+            # Filtro de limpieza: ignora productos en blanco o códigos inactivos
+            if not producto or producto == "." or "INACTIVO" in producto:
+                continue
+                
+            precio = fila.get("Precio de venta", "N/A")
+            stock = fila.get("Existencia", "N/A")
+            
+            # Formateo visual para que la IA entienda si hay o no disponibilidad
+            try:
+                stock_num = float(stock)
+                estado = "Agotado" if stock_num <= 0 else f"Disponible ({stock_num})"
+            except (ValueError, TypeError):
+                estado = f"Disponible ({stock})"
+            
+            lineas_inventario.append(f"- {producto} | Precio: ${precio} | Stock: {estado}")
+            
+        return "\n".join(lineas_inventario)
+    except Exception as e:
+        print(f"[ERROR GOOGLE SHEETS]: {e}", flush=True)
+        return "=== BASE DE DATOS ===\nEl inventario está temporalmente inaccesible. Escala la consulta a ventas."
+
 def procesar_gemini_y_responder(chat_id, texto_usuario):
-    print(f"\n[INICIANDO HILO] Analizando solicitud técnica de {chat_id}...", flush=True)
+    print(f"\n[INICIANDO HILO] Analizando solicitud técnica y revisando inventario de {chat_id}...", flush=True)
     
+    # Descarga el inventario en milisegundos
+    inventario_actualizado = obtener_inventario_sheets()
+
     now = get_venezuela_time()
     hora_str = now.strftime("%I:%M %p")
-    contexto = f"Hora Actual: {hora_str}\nCliente: {texto_usuario}"
+    
+    contexto = f"Hora Actual: {hora_str}\nCliente: {texto_usuario}\n\n{inventario_actualizado}"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
@@ -78,17 +123,14 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
     
     for intento in range(intentos_maximos):
         try:
-            # Límite de 90 segundos por intento
             response = requests.post(url, headers=headers, json=payload, timeout=90)
             datos = response.json()
 
-            # Evaluar si Google arrojó un error 503 por saturación
             if 'error' in datos and datos['error'].get('code') == 503:
                 print(f"[ADVERTENCIA] Google saturado (Error 503). Reintento silencioso {intento + 1}/{intentos_maximos} en progreso...", flush=True)
-                time.sleep(2)  # Espera 2 segundos antes de volver a intentar
+                time.sleep(2)
                 continue
 
-            # Evaluar si la respuesta fue exitosa
             if 'candidates' in datos:
                 reply = datos['candidates'][0]['content']['parts'][0]['text'].strip()
                 print("[RESPUESTA DE GEMINI PROCESADA CON ÉXITO]", flush=True)
@@ -107,25 +149,20 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
                 else:
                     send_whatsapp_message(chat_id, reply)
                 
-                return # Salir de la función al obtener éxito
+                return
 
-            # Si hay un error distinto al 503 (ej. llave inválida o modelo no encontrado), rompe el ciclo
             print(f"[GEMINI ERROR INTERNO]: {datos}", flush=True)
             break 
 
         except requests.exceptions.RequestException as e:
             print(f"[ERROR DE RED] Falla en el intento {intento + 1}: {e}", flush=True)
-            time.sleep(2) # Espera antes de reintentar si hay una caída de conexión
+            time.sleep(2)
             continue
 
-    # Si se agotan los reintentos sin éxito:
     print("[ERROR CRÍTICO] Se agotaron los reintentos. Transfiriendo a un humano.", flush=True)
-    send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes técnicos procesando el diagnóstico debido a la alta demanda. Te transferiré a un asesor.")
+    send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes técnicos procesando el diagnóstico. Te transferiré a un asesor.")
     send_whatsapp_message(NUMERO_TECNICO, f"⚠️ ALERTA: Fallo de conexión IA con el cliente {chat_id.split('@')[0]}")
 
-# ==========================================
-# RUTA WEBHOOK
-# ==========================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -141,7 +178,6 @@ def webhook():
         if chat_id not in NUMEROS_PERMITIDOS and not is_me:
             return 'OK', 200
 
-        # GESTIÓN DE CONTROL MANUAL Y GATILLOS
         if is_me:
             text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or \
                    body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
@@ -160,7 +196,6 @@ def webhook():
                     print(f"[BOT REACTIVADO AUTOMÁTICAMENTE] Frase de despedida detectada.", flush=True)
             return 'OK', 200
 
-        # TEMPORIZADOR DE INACTIVIDAD (2 HORAS)
         if chat_id in chats_pausados:
             diferencia = now - chats_pausados[chat_id]
             if diferencia >= timedelta(hours=2):
@@ -169,7 +204,6 @@ def webhook():
             else:
                 return 'OK', 200
 
-        # EXTRACCIÓN ROBUSTA DE TEXTO
         texto_usuario = ""
         if msg_type == 'textMessage':
             texto_usuario = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
@@ -185,7 +219,6 @@ def webhook():
         print(f"\n====================================", flush=True)
         print(f"[NUEVO MENSAJE] {chat_id.split('@')[0]}: {texto_usuario}", flush=True)
 
-        # DESPLIEGUE DEL HILO ASÍNCRONO SIN MENSAJE INTERMEDIO
         hilo = threading.Thread(target=procesar_gemini_y_responder, args=(chat_id, texto_usuario))
         hilo.start()
 
