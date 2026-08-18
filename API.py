@@ -63,39 +63,75 @@ def send_whatsapp_message(chat_id, text):
         print(f"[GREEN API ERROR DE RED]: No se pudo conectar. Detalle: {e}", flush=True)
 
 def obtener_inventario_sheets():
-    """Conecta con Google Sheets, descarga el inventario en tiempo real y lo formatea."""
+    """Conecta con Google Sheets, descarga el inventario y busca dinámicamente las columnas."""
     try:
         credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
         gc = gspread.service_account_from_dict(credenciales_json)
         
-        # El nombre debe coincidir exactamente con el título de tu archivo en Google Drive
         sh = gc.open("Inventario Campo Salud")
         hoja = sh.sheet1
-        registros = hoja.get_all_records()
+        
+        # Leemos toda la matriz en bruto, ignorando si hay columnas vacías
+        matriz = hoja.get_all_values()
         
         lineas_inventario = ["=== BASE DE DATOS: PRECIOS Y DISPONIBILIDAD ==="]
         
-        for fila in registros:
-            # Busca exactamente la columna 'Descripción'
-            producto = str(fila.get("Descripción", "")).strip()
+        idx_desc = -1
+        idx_precio = -1
+        idx_stock = -1
+        fila_inicio = 0
+        
+        # Búsqueda dinámica de los encabezados (ignora membretes o filas basura)
+        for i, fila in enumerate(matriz):
+            fila_limpia = [str(celda).strip().lower() for celda in fila]
             
-            # Filtro de limpieza: ignora productos en blanco o códigos inactivos
+            if "descripción" in fila_limpia or "descripcion" in fila_limpia:
+                idx_desc = fila_limpia.index("descripción") if "descripción" in fila_limpia else fila_limpia.index("descripcion")
+                
+                if "precio de venta" in fila_limpia:
+                    idx_precio = fila_limpia.index("precio de venta")
+                elif "precio" in fila_limpia:
+                    idx_precio = fila_limpia.index("precio")
+                    
+                if "existencia" in fila_limpia:
+                    idx_stock = fila_limpia.index("existencia")
+                elif "stock" in fila_limpia:
+                    idx_stock = fila_limpia.index("stock")
+                    
+                fila_inicio = i + 1
+                break
+        
+        # Si el documento está completamente vacío o dañado
+        if idx_desc == -1 or idx_precio == -1 or idx_stock == -1:
+            return "=== BASE DE DATOS ===\nError interno: No se encontraron las columnas 'Descripción', 'Precio de venta' o 'Existencia'."
+        
+        # Extraemos los productos usando las coordenadas exactas que encontramos
+        for fila in matriz[fila_inicio:]:
+            # Evitar errores si la fila está cortada
+            if len(fila) <= max(idx_desc, idx_precio, idx_stock):
+                continue
+                
+            producto = str(fila[idx_desc]).strip()
+            
+            # Filtro de limpieza: ignora productos vacíos o inactivos
             if not producto or producto == "." or "INACTIVO" in producto:
                 continue
                 
-            precio = fila.get("Precio de venta", "N/A")
-            stock = fila.get("Existencia", "N/A")
+            precio = str(fila[idx_precio]).strip() or "N/A"
+            stock = str(fila[idx_stock]).strip() or "N/A"
             
-            # Formateo visual para que la IA entienda si hay o no disponibilidad
+            # Formateo de disponibilidad
             try:
-                stock_num = float(stock)
+                # Reemplazamos comas por puntos por si el Excel exportó los decimales así
+                stock_num = float(stock.replace(',', '.'))
                 estado = "Agotado" if stock_num <= 0 else f"Disponible ({stock_num})"
-            except (ValueError, TypeError):
+            except ValueError:
                 estado = f"Disponible ({stock})"
             
             lineas_inventario.append(f"- {producto} | Precio: ${precio} | Stock: {estado}")
             
         return "\n".join(lineas_inventario)
+        
     except Exception as e:
         print(f"[ERROR GOOGLE SHEETS]: {e}", flush=True)
         return "=== BASE DE DATOS ===\nEl inventario está temporalmente inaccesible. Escala la consulta a ventas."
