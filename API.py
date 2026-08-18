@@ -75,7 +75,7 @@ def consultar_gemini(texto_usuario, chat_id):
     print(f"[CONSULTANDO A GEMINI PARA {chat_id} ...]", flush=True)
     try:
         # TIMEOUT AÑADIDO (15 segundos) PARA PREVENIR COLAPSOS
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=40)
         datos = response.json()
         if 'candidates' in datos:
             print("[RESPUESTA DE GEMINI LISTA]", flush=True)
