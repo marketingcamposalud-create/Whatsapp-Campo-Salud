@@ -26,7 +26,19 @@ chats_pausados = {}
 historial_chats = {}
 
 # ==========================================
-# CEREBRO DEL BOT (CAJERO AUTÓNOMO + HORARIOS + OPTIMIZACIÓN)
+# MEMORIA CACHÉ GLOBAL (ALTA VELOCIDAD)
+# ==========================================
+CACHE_INVENTARIO = {
+    "matriz": [],
+    "idx_desc": -1,
+    "idx_precio": -1,
+    "idx_stock": -1,
+    "fila_inicio": 0,
+    "ultima_actualizacion": 0
+}
+
+# ==========================================
+# CEREBRO DEL BOT
 # ==========================================
 SYSTEM_PROMPT = """
 Eres "Campo", el asistente virtual y asesor de ventas de Campo Salud, ubicada en Mucuchíes.
@@ -71,11 +83,11 @@ def send_whatsapp_message(chat_id, text):
         print(f"[GREEN API ERROR DE RED]: {e}", flush=True)
 
 # ==========================================
-# MOTOR DE BÚSQUEDA ALFANUMÉRICO Y RETENCIÓN DE CONTEXTO
+# MOTOR DE BÚSQUEDA EN RAM (SIN LATENCIA DE RED)
 # ==========================================
 def obtener_inventario_filtrado(texto_busqueda):
+    global CACHE_INVENTARIO
     try:
-        # BÚSQUEDA ALFANUMÉRICA: Detecta desde 2 caracteres (incluye números como "60" o letras como "NK")
         palabras_usuario = re.findall(r'\b[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9]{2,}\b', texto_busqueda.lower())
         ignoradas = {'hola', 'buenas', 'tardes', 'días', 'dias', 'tienen', 'precio', 'cuanto', 'cuesta', 'quiero', 'necesito', 'para', 'como', 'estan', 'estoy', 'ustedes', 'comprar', 'unas', 'pero', 'ahora', 'poco', 'tonto', 'mejorar', 'eso', 'esto', 'aqui', 'aquí', 'dijiste', 'tiene', 'estaba', 'cual', 'quien', 'donde', 'que', 'con', 'del', 'los', 'las', 'pago', 'movil', 'cuenta', 'transferencia', 'listo', 'ya', 'pague'}
         claves_utiles = [p for p in palabras_usuario if p not in ignoradas]
@@ -83,24 +95,45 @@ def obtener_inventario_filtrado(texto_busqueda):
         if not claves_utiles:
             return "=== RESULTADOS DEL INVENTARIO ===\nNo se detectaron productos específicos para buscar en la base de datos en este momento."
 
-        credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
-        gc = gspread.service_account_from_dict(credenciales_json)
-        sh = gc.open("Inventario Campo Salud")
-        hoja = sh.sheet1
-        matriz = hoja.get_all_values()
+        tiempo_actual = time.time()
         
-        idx_desc, idx_precio, idx_stock, fila_inicio = -1, -1, -1, 0
-        
-        for i, fila in enumerate(matriz):
-            fila_limpia = [str(celda).strip().lower() for celda in fila]
-            if "descripción" in fila_limpia or "descripcion" in fila_limpia:
-                idx_desc = fila_limpia.index("descripción") if "descripción" in fila_limpia else fila_limpia.index("descripcion")
-                idx_precio = fila_limpia.index("precio de venta") if "precio de venta" in fila_limpia else fila_limpia.index("precio") if "precio" in fila_limpia else -1
-                idx_stock = fila_limpia.index("existencia") if "existencia" in fila_limpia else fila_limpia.index("stock") if "stock" in fila_limpia else -1
-                fila_inicio = i + 1
-                break
-        
-        if idx_desc == -1: return "Error interno: Columnas de inventario no encontradas."
+        # Renueva la caché cada 15 minutos (900 segundos) para no viajar a Google en cada mensaje
+        if tiempo_actual - CACHE_INVENTARIO["ultima_actualizacion"] > 900 or not CACHE_INVENTARIO["matriz"]:
+            print("[SISTEMA CACHÉ] Descargando base de datos desde Google Sheets...", flush=True)
+            credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
+            gc = gspread.service_account_from_dict(credenciales_json)
+            sh = gc.open("Inventario Campo Salud")
+            hoja = sh.sheet1
+            matriz_cruda = hoja.get_all_values()
+            
+            idx_desc, idx_precio, idx_stock, fila_inicio = -1, -1, -1, 0
+            
+            for i, fila in enumerate(matriz_cruda):
+                fila_limpia = [str(celda).strip().lower() for celda in fila]
+                if "descripción" in fila_limpia or "descripcion" in fila_limpia:
+                    idx_desc = fila_limpia.index("descripción") if "descripción" in fila_limpia else fila_limpia.index("descripcion")
+                    idx_precio = fila_limpia.index("precio de venta") if "precio de venta" in fila_limpia else fila_limpia.index("precio") if "precio" in fila_limpia else -1
+                    idx_stock = fila_limpia.index("existencia") if "existencia" in fila_limpia else fila_limpia.index("stock") if "stock" in fila_limpia else -1
+                    fila_inicio = i + 1
+                    break
+            
+            if idx_desc != -1:
+                CACHE_INVENTARIO["matriz"] = matriz_cruda
+                CACHE_INVENTARIO["idx_desc"] = idx_desc
+                CACHE_INVENTARIO["idx_precio"] = idx_precio
+                CACHE_INVENTARIO["idx_stock"] = idx_stock
+                CACHE_INVENTARIO["fila_inicio"] = fila_inicio
+                CACHE_INVENTARIO["ultima_actualizacion"] = tiempo_actual
+                print("[SISTEMA CACHÉ] Actualización exitosa. Datos guardados en RAM.", flush=True)
+            else:
+                return "Error interno: Columnas de inventario no encontradas."
+
+        # Extraer variables de la memoria RAM ultrarrápida
+        matriz = CACHE_INVENTARIO["matriz"]
+        idx_desc = CACHE_INVENTARIO["idx_desc"]
+        idx_precio = CACHE_INVENTARIO["idx_precio"]
+        idx_stock = CACHE_INVENTARIO["idx_stock"]
+        fila_inicio = CACHE_INVENTARIO["fila_inicio"]
         
         lineas_inventario = ["=== RESULTADOS DEL INVENTARIO (FILTRADO) ==="]
         coincidencias = 0
@@ -171,13 +204,14 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
     payload = {"contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contexto}"}]}]}
     headers = {'Content-Type': 'application/json'}
 
+    # Reducción del timeout a 35 segundos (Fail-Fast)
     for intento in range(3):
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            response = requests.post(url, headers=headers, json=payload, timeout=35)
             datos = response.json()
 
             if 'error' in datos and datos['error'].get('code') == 503:
-                time.sleep(2)
+                time.sleep(1)
                 continue
 
             if 'candidates' in datos:
@@ -208,11 +242,12 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
 
             break 
         except requests.exceptions.RequestException:
-            time.sleep(2)
+            print(f"[IA REINTENTO] Tiempo de espera agotado. Lanzando intento {intento + 2}...", flush=True)
+            time.sleep(1)
             continue
 
-    send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes técnicos. Te transferiré a un asesor.")
-    send_whatsapp_message(NUMERO_TECNICO, f"⚠️ Fallo de IA con {chat_id.split('@')[0]}")
+    send_whatsapp_message(chat_id, "Disculpa, tengo inconvenientes de conexión en este instante. Te transferiré a un asesor.")
+    send_whatsapp_message(NUMERO_TECNICO, f"⚠️ Fallo de IA (Timeout) con {chat_id.split('@')[0]}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -224,11 +259,6 @@ def webhook():
         msg_type = body.get('messageData', {}).get('typeMessage')
         is_me = body.get('senderData', {}).get('isMe')
         now = get_venezuela_time()
-
-        # ==========================================
-        # ESCUDO VIP DESACTIVADO PARA PRODUCCIÓN
-        # if chat_id not in NUMEROS_PERMITIDOS and not is_me: return 'OK', 200
-        # ==========================================
 
         if is_me:
             text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
@@ -277,7 +307,8 @@ def webhook():
         print(f"\n[NUEVO MENSAJE] {chat_id.split('@')[0]}: {texto_usuario}", flush=True)
         threading.Thread(target=procesar_gemini_y_responder, args=(chat_id, texto_usuario)).start()
         return 'OK', 200
-    except Exception:
+    except Exception as e:
+        print(f"[CRITICAL WEBHOOK ERROR]: {e}", flush=True)
         return 'OK', 200
 
 if __name__ == '__main__':
