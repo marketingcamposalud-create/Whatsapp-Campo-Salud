@@ -276,12 +276,13 @@ def webhook():
             hora_actual_decimal = now.hour + now.minute / 60.0
             es_horario_laboral = (dia_actual not in ["Sábado", "Domingo"]) and ((8.0 <= hora_actual_decimal < 12.0) or (14.0 <= hora_actual_decimal < 17.0))
             
-            if now - chats_pausados[chat_id] >= timedelta(hours=2) and es_horario_laboral: 
-                chats_pausados.pop(chat_id, None)
-                historial_chats.pop(chat_id, None)
-            else: 
-                return 'OK', 200
-
+        if now - chats_pausados[chat_id] >= timedelta(hours=2) and es_horario_laboral: 
+            chats_pausados.pop(chat_id, None)
+            historial_chats.pop(chat_id, None)
+          else: 
+            print(f"[CHAT PAUSADO EN SILENCIO] Mensaje de {chat_id} ignorado para no interrumpir al humano.", flush=True)
+            return 'OK', 200
+              
         texto_usuario = ""
         if msg_type == 'textMessage': texto_usuario = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
         elif msg_type == 'extendedTextMessage': texto_usuario = body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
