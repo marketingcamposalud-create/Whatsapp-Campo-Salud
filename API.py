@@ -4,7 +4,7 @@ import threading
 import time
 import json
 import gspread
-import re  # NUEVA LIBRERÍA: Para analizar palabras clave
+import re
 from flask import Flask, request
 from datetime import datetime, timezone, timedelta
 
@@ -23,6 +23,7 @@ NUMERO_TECNICO = "584247609075@c.us"
 NUMERO_FACTURACION = "584247157087@c.us"
 
 chats_pausados = {}
+historial_chats = {} # NUEVO: Memoria a corto plazo para evitar amnesia de sesión
 
 # ==========================================
 # CEREBRO DEL BOT
@@ -32,16 +33,15 @@ Eres "Campo", el asistente virtual experto de la empresa Campo Salud, ubicada en
 REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno.
 CAPACIDAD: Responde dudas agronómicas, veterinarias y proporciona precios de los resultados del inventario.
 
-REGLAS DE INVENTARIO Y VENTAS:
-1. Revisa los "RESULTADOS DEL INVENTARIO" que se te proporcionan en el contexto. Estos resultados ya fueron filtrados según lo que pidió el cliente.
-2. Si un producto dice "Agotado", infórmalo amablemente.
-3. Si el contexto dice "Producto no encontrado", no inventes precios. Escala a ventas.
-4. Basa tus recomendaciones en insumos propios como OMEX NK 60 (8.4% N), Byo-K 40 y Potten-T.
+REGLAS DE INVENTARIO Y CONTEXTO:
+1. Revisa detenidamente el "HISTORIAL DE CONVERSACIÓN RECIENTE" para recordar qué le has dicho al cliente y mantener el hilo lógico de la charla.
+2. Revisa los "RESULTADOS DEL INVENTARIO". Si un producto dice "Agotado", puedes dar su precio si el cliente lo pregunta, pero aclara inmediatamente que no hay existencia.
+3. Si el contexto dice "Producto no encontrado", no inventes precios bajo ninguna circunstancia. Escala a ventas.
 
 SISTEMA DE ESCALADO AUTOMÁTICO (ESTRICTO):
 Si puedes dar la solución o el precio por ti mismo, responde directamente SIN añadir etiqueta.
 Si debes escalar, AÑADE UNA SOLA ETIQUETA al final:
-[ESCALAR_VENTAS] -> Si piden cotizaciones mayores, productos no listados, o desean comprar.
+[ESCALAR_VENTAS] -> Si piden cotizaciones mayores, productos no listados, o desean pagar.
 [ESCALAR_TECNICO] -> Si requiere diagnóstico avanzado de un ingeniero.
 [ESCALAR_FACTURACION] -> Si hacen preguntas de envíos o facturación previa.
 """
@@ -59,21 +59,20 @@ def send_whatsapp_message(chat_id, text):
         print(f"[GREEN API ERROR DE RED]: {e}", flush=True)
 
 # ==========================================
-# MOTOR DE BÚSQUEDA (EL AHORRADOR DE DINERO)
+# MOTOR DE BÚSQUEDA CON RETENCIÓN DE CONTEXTO
 # ==========================================
-def obtener_inventario_filtrado(texto_usuario):
-    """Busca en Google Sheets SOLO los productos que mencionó el cliente para ahorrar costos de IA."""
+def obtener_inventario_filtrado(texto_busqueda):
+    """Busca en Google Sheets cruzando el mensaje actual y el anterior para no perder el contexto."""
     try:
-        # Extraemos palabras de más de 3 letras del mensaje del cliente
-        palabras_usuario = re.findall(r'\b[a-zA-ZáéíóúÁÉÍÓÚñÑ]{4,}\b', texto_usuario.lower())
+        # Extraemos palabras clave (ahora de 3 o más letras para incluir palabras cortas como "ajo")
+        palabras_usuario = re.findall(r'\b[a-zA-ZáéíóúÁÉÍÓÚñÑ]{3,}\b', texto_busqueda.lower())
         
-        # Palabras comunes que no son productos, para que el buscador las ignore
-        ignoradas = {'hola', 'buenas', 'tardes', 'días', 'dias', 'tienen', 'precio', 'cuanto', 'cuesta', 'quiero', 'necesito', 'para', 'como', 'estan', 'estoy', 'ustedes'}
+        # Palabras comunes y de relleno que el buscador debe ignorar
+        ignoradas = {'hola', 'buenas', 'tardes', 'días', 'dias', 'tienen', 'precio', 'cuanto', 'cuesta', 'quiero', 'necesito', 'para', 'como', 'estan', 'estoy', 'ustedes', 'comprar', 'unas', 'pero', 'ahora', 'poco', 'tonto', 'mejorar', 'eso', 'esto', 'aqui', 'aquí', 'dijiste', 'tiene', 'estaba', 'cual', 'quien', 'donde', 'que', 'con', 'del', 'los', 'las'}
         claves_utiles = [p for p in palabras_usuario if p not in ignoradas]
         
-        # Si el cliente solo dice "Hola" o una duda veterinaria sin mencionar un producto, no descargamos la base de datos
         if not claves_utiles:
-            return "=== RESULTADOS DEL INVENTARIO ===\nNo se solicitaron productos específicos."
+            return "=== RESULTADOS DEL INVENTARIO ===\nNo se solicitaron productos específicos o la base de datos no es necesaria para responder a este mensaje."
 
         credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
         gc = gspread.service_account_from_dict(credenciales_json)
@@ -92,7 +91,7 @@ def obtener_inventario_filtrado(texto_usuario):
                 fila_inicio = i + 1
                 break
         
-        if idx_desc == -1: return "Error interno: Columnas no encontradas."
+        if idx_desc == -1: return "Error interno: Columnas de inventario no encontradas."
         
         lineas_inventario = ["=== RESULTADOS DEL INVENTARIO (FILTRADO) ==="]
         coincidencias = 0
@@ -105,7 +104,7 @@ def obtener_inventario_filtrado(texto_usuario):
             
             if not producto_original or producto_original == "." or "inactivo" in producto_lower: continue
             
-            # MAGIA TÉCNICA: Si el nombre del producto en el Excel contiene alguna palabra clave del cliente, lo extrae
+            # Buscador: Si el nombre del Excel contiene alguna palabra clave útil, extrae el registro completo
             if any(clave in producto_lower for clave in claves_utiles):
                 precio = str(fila[idx_precio]).strip() or "N/A"
                 stock = str(fila[idx_stock]).strip() or "N/A"
@@ -119,13 +118,12 @@ def obtener_inventario_filtrado(texto_usuario):
                 lineas_inventario.append(f"- {producto_original} | Precio: ${precio} | Stock: {estado}")
                 coincidencias += 1
                 
-                # Límite de seguridad: Si encuentra más de 20 coincidencias, se detiene para no saturar tokens
-                if coincidencias >= 20:
+                if coincidencias >= 30:
                     lineas_inventario.append("... (Múltiples resultados encontrados, especifique más su búsqueda).")
                     break
         
         if coincidencias == 0:
-            return "=== RESULTADOS DEL INVENTARIO ===\nProducto no encontrado. Escalar a ventas para verificar disponibilidad manual."
+            return "=== RESULTADOS DEL INVENTARIO ===\nProducto no encontrado. Escalar a ventas para verificar existencia manual."
             
         return "\n".join(lineas_inventario)
         
@@ -136,12 +134,32 @@ def obtener_inventario_filtrado(texto_usuario):
 def procesar_gemini_y_responder(chat_id, texto_usuario):
     print(f"\n[INICIANDO HILO] Consultando para: {chat_id}...", flush=True)
     
-    # Ahora Python solo extrae lo estrictamente necesario
-    inventario_filtrado = obtener_inventario_filtrado(texto_usuario)
+    # 1. Gestionar Memoria a Corto Plazo
+    if chat_id not in historial_chats:
+        historial_chats[chat_id] = []
+        
+    # Extraemos el mensaje anterior del cliente para dar contexto cruzado al buscador de inventario
+    texto_contexto_busqueda = texto_usuario
+    for msg in reversed(historial_chats[chat_id]):
+        if msg.startswith("Cliente:"):
+            texto_contexto_busqueda = msg.replace("Cliente:", "").strip() + " " + texto_usuario
+            break
+            
+    # 2. Descargamos la data filtrada y combinada
+    inventario_filtrado = obtener_inventario_filtrado(texto_contexto_busqueda)
+
+    # 3. Guardamos el mensaje actual en el búfer de memoria
+    historial_chats[chat_id].append(f"Cliente: {texto_usuario}")
+    if len(historial_chats[chat_id]) > 6:
+        historial_chats[chat_id].pop(0) # Borra interacciones muy viejas para no saturar tokens
 
     now = get_venezuela_time()
     hora_str = now.strftime("%I:%M %p")
-    contexto = f"Hora Actual: {hora_str}\nCliente: {texto_usuario}\n\n{inventario_filtrado}"
+    
+    # 4. Compilamos el hilo de la conversación para que la IA lo lea
+    bloque_historial = "\n".join(historial_chats[chat_id])
+    
+    contexto = f"Hora Actual: {hora_str}\n\n{inventario_filtrado}\n\n=== HISTORIAL DE CONVERSACIÓN RECIENTE ===\n{bloque_historial}\nCampo (Tú):"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contexto}"}]}]}
@@ -159,6 +177,11 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
             if 'candidates' in datos:
                 reply = datos['candidates'][0]['content']['parts'][0]['text'].strip()
                 print("[RESPUESTA EXITOSA]", flush=True)
+
+                # Guardamos la respuesta del bot en la memoria para que no se contradiga después
+                historial_chats[chat_id].append(f"Campo (Tú): {reply}")
+                if len(historial_chats[chat_id]) > 6:
+                    historial_chats[chat_id].pop(0)
 
                 destino = None
                 if "[ESCALAR_VENTAS]" in reply: destino = NUMERO_VENTAS
@@ -202,10 +225,13 @@ def webhook():
             elif text.strip() == '/bot off': chats_pausados[chat_id] = now
             elif any(frase in text_lower for frase in ["feliz dia", "feliz día", "feliz tarde", "feliz noche", "estamos a la orden", "a su orden", "hasta luego", "gracias por preferirnos"]):
                 chats_pausados.pop(chat_id, None)
+                historial_chats.pop(chat_id, None) # Borra la memoria si un humano cierra la venta
             return 'OK', 200
 
         if chat_id in chats_pausados:
-            if now - chats_pausados[chat_id] >= timedelta(hours=2): chats_pausados.pop(chat_id, None)
+            if now - chats_pausados[chat_id] >= timedelta(hours=2): 
+                chats_pausados.pop(chat_id, None)
+                historial_chats.pop(chat_id, None) # Reseteo total del cerebro tras 2 horas de inactividad
             else: return 'OK', 200
 
         texto_usuario = ""
