@@ -23,27 +23,39 @@ NUMERO_TECNICO = "584247609075@c.us"
 NUMERO_FACTURACION = "584247157087@c.us"
 
 chats_pausados = {}
-historial_chats = {} # NUEVO: Memoria a corto plazo para evitar amnesia de sesión
+historial_chats = {}
 
 # ==========================================
-# CEREBRO DEL BOT
+# CEREBRO DEL BOT (CAJERO AUTÓNOMO + HORARIOS + OPTIMIZACIÓN)
 # ==========================================
 SYSTEM_PROMPT = """
-Eres "Campo", el asistente virtual experto de la empresa Campo Salud, ubicada en Mucuchíes.
+Eres "Campo", el asistente virtual y asesor de ventas de Campo Salud, ubicada en Mucuchíes.
 REGLA DE ORO (ESTILO): Eres directo, conciso y extremadamente profesional. Cero texto de relleno.
-CAPACIDAD: Responde dudas agronómicas, veterinarias y proporciona precios de los resultados del inventario.
+CAPACIDAD: Responde dudas agronómicas, veterinarias y CIERRA VENTAS DE FORMA AUTÓNOMA.
 
-REGLAS DE INVENTARIO Y CONTEXTO:
-1. Revisa detenidamente el "HISTORIAL DE CONVERSACIÓN RECIENTE" para recordar qué le has dicho al cliente y mantener el hilo lógico de la charla.
-2. Revisa los "RESULTADOS DEL INVENTARIO". Si un producto dice "Agotado", puedes dar su precio si el cliente lo pregunta, pero aclara inmediatamente que no hay existencia.
-3. Si el contexto dice "Producto no encontrado", no inventes precios bajo ninguna circunstancia. Escala a ventas.
+DATOS BANCARIOS DE CAMPO SALUD, C.A. (RIF: J-310112029):
+- Pago Móvil Provincial (0108): Teléfono 0412-7178563
+- Pago Móvil B. de Venezuela (0102): Teléfono 0412-7178563
+- Transferencia Provincial: Cuenta Corriente 0108-0114-16-0100025892
+
+HORARIO DE ATENCIÓN Y LOGÍSTICA:
+- Lunes a Viernes: 8:00 AM a 12:00 PM y de 2:00 PM a 5:00 PM.
+- Sábados y Domingos: CERRADO.
+- REGLA ESTRICTA FUERA DE HORARIO: Revisa detenidamente el "Día Actual" y la "Hora Actual" provistos en el contexto. Si el horario actual NO está dentro del rango laboral, NO puedes concretar ventas, dar datos de pago, ni transferir la conversación a un humano. Debes informar amablemente que la tienda física está cerrada, indicar el horario de atención, y aclarar que las compras y el soporte directo se retomarán al abrir. Puedes seguir respondiendo dudas técnicas 24/7.
+
+REGLAS DE INVENTARIO Y CIERRE DE VENTAS:
+1. Revisa el "HISTORIAL DE CONVERSACIÓN RECIENTE" para recordar el contexto.
+2. Revisa los "RESULTADOS DEL INVENTARIO". Si un producto está "Agotado", infórmalo, no inventes precios.
+3. CIERRE AUTÓNOMO: Si el cliente confirma que desea comprar un producto disponible, calcula el total a pagar, proporciónale INMEDIATAMENTE los datos bancarios y pídele que envíe el comprobante (foto o referencia) por este mismo chat.
+4. Basa tus recomendaciones en insumos propios como OMEX NK 60 (8.4% N), Byo-K 40 y Potten-T.
+5. CONSOLIDACIÓN DE MENSAJES: Si notas en el historial que el cliente envió varios mensajes cortos y fragmentados uno tras otro, responde UNA SOLA VEZ abordando toda la idea junta. No des respuestas fragmentadas.
 
 SISTEMA DE ESCALADO AUTOMÁTICO (ESTRICTO):
-Si puedes dar la solución o el precio por ti mismo, responde directamente SIN añadir etiqueta.
-Si debes escalar, AÑADE UNA SOLA ETIQUETA al final:
-[ESCALAR_VENTAS] -> Si piden cotizaciones mayores, productos no listados, o desean pagar.
-[ESCALAR_TECNICO] -> Si requiere diagnóstico avanzado de un ingeniero.
-[ESCALAR_FACTURACION] -> Si hacen preguntas de envíos o facturación previa.
+Si estás asesorando, dando precios o concretando una venta normal, responde directamente SIN añadir etiqueta.
+ÚNICAMENTE AÑADE UNA ETIQUETA AL FINAL en estos casos:
+[ESCALAR_FACTURACION] -> SI EL CLIENTE ENVÍA UN NÚMERO DE REFERENCIA DE PAGO ESCRITO o tiene un problema de facturación.
+[ESCALAR_VENTAS] -> Solo si piden cotizaciones de muy alto volumen o productos que no están en el inventario.
+[ESCALAR_TECNICO] -> Solo si la consulta requiere un diagnóstico muy complejo de un ingeniero.
 """
 
 def get_venezuela_time():
@@ -59,20 +71,17 @@ def send_whatsapp_message(chat_id, text):
         print(f"[GREEN API ERROR DE RED]: {e}", flush=True)
 
 # ==========================================
-# MOTOR DE BÚSQUEDA CON RETENCIÓN DE CONTEXTO
+# MOTOR DE BÚSQUEDA ALFANUMÉRICO Y RETENCIÓN DE CONTEXTO
 # ==========================================
 def obtener_inventario_filtrado(texto_busqueda):
-    """Busca en Google Sheets cruzando el mensaje actual y el anterior para no perder el contexto."""
     try:
-        # Extraemos palabras clave (ahora de 3 o más letras para incluir palabras cortas como "ajo")
-        palabras_usuario = re.findall(r'\b[a-zA-ZáéíóúÁÉÍÓÚñÑ]{3,}\b', texto_busqueda.lower())
-        
-        # Palabras comunes y de relleno que el buscador debe ignorar
-        ignoradas = {'hola', 'buenas', 'tardes', 'días', 'dias', 'tienen', 'precio', 'cuanto', 'cuesta', 'quiero', 'necesito', 'para', 'como', 'estan', 'estoy', 'ustedes', 'comprar', 'unas', 'pero', 'ahora', 'poco', 'tonto', 'mejorar', 'eso', 'esto', 'aqui', 'aquí', 'dijiste', 'tiene', 'estaba', 'cual', 'quien', 'donde', 'que', 'con', 'del', 'los', 'las'}
+        # BÚSQUEDA ALFANUMÉRICA: Detecta desde 2 caracteres (incluye números como "60" o letras como "NK")
+        palabras_usuario = re.findall(r'\b[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9]{2,}\b', texto_busqueda.lower())
+        ignoradas = {'hola', 'buenas', 'tardes', 'días', 'dias', 'tienen', 'precio', 'cuanto', 'cuesta', 'quiero', 'necesito', 'para', 'como', 'estan', 'estoy', 'ustedes', 'comprar', 'unas', 'pero', 'ahora', 'poco', 'tonto', 'mejorar', 'eso', 'esto', 'aqui', 'aquí', 'dijiste', 'tiene', 'estaba', 'cual', 'quien', 'donde', 'que', 'con', 'del', 'los', 'las', 'pago', 'movil', 'cuenta', 'transferencia', 'listo', 'ya', 'pague'}
         claves_utiles = [p for p in palabras_usuario if p not in ignoradas]
         
         if not claves_utiles:
-            return "=== RESULTADOS DEL INVENTARIO ===\nNo se solicitaron productos específicos o la base de datos no es necesaria para responder a este mensaje."
+            return "=== RESULTADOS DEL INVENTARIO ===\nNo se detectaron productos específicos para buscar en la base de datos en este momento."
 
         credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
         gc = gspread.service_account_from_dict(credenciales_json)
@@ -104,7 +113,6 @@ def obtener_inventario_filtrado(texto_busqueda):
             
             if not producto_original or producto_original == "." or "inactivo" in producto_lower: continue
             
-            # Buscador: Si el nombre del Excel contiene alguna palabra clave útil, extrae el registro completo
             if any(clave in producto_lower for clave in claves_utiles):
                 precio = str(fila[idx_precio]).strip() or "N/A"
                 stock = str(fila[idx_stock]).strip() or "N/A"
@@ -123,7 +131,7 @@ def obtener_inventario_filtrado(texto_busqueda):
                     break
         
         if coincidencias == 0:
-            return "=== RESULTADOS DEL INVENTARIO ===\nProducto no encontrado. Escalar a ventas para verificar existencia manual."
+            return "=== RESULTADOS DEL INVENTARIO ===\nProducto no encontrado. Recomienda alternativas o escala a ventas."
             
         return "\n".join(lineas_inventario)
         
@@ -134,32 +142,30 @@ def obtener_inventario_filtrado(texto_busqueda):
 def procesar_gemini_y_responder(chat_id, texto_usuario):
     print(f"\n[INICIANDO HILO] Consultando para: {chat_id}...", flush=True)
     
-    # 1. Gestionar Memoria a Corto Plazo
     if chat_id not in historial_chats:
         historial_chats[chat_id] = []
         
-    # Extraemos el mensaje anterior del cliente para dar contexto cruzado al buscador de inventario
     texto_contexto_busqueda = texto_usuario
     for msg in reversed(historial_chats[chat_id]):
         if msg.startswith("Cliente:"):
             texto_contexto_busqueda = msg.replace("Cliente:", "").strip() + " " + texto_usuario
             break
             
-    # 2. Descargamos la data filtrada y combinada
     inventario_filtrado = obtener_inventario_filtrado(texto_contexto_busqueda)
 
-    # 3. Guardamos el mensaje actual en el búfer de memoria
     historial_chats[chat_id].append(f"Cliente: {texto_usuario}")
     if len(historial_chats[chat_id]) > 6:
-        historial_chats[chat_id].pop(0) # Borra interacciones muy viejas para no saturar tokens
+        historial_chats[chat_id].pop(0)
 
     now = get_venezuela_time()
     hora_str = now.strftime("%I:%M %p")
     
-    # 4. Compilamos el hilo de la conversación para que la IA lo lea
+    dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    dia_actual = dias[now.weekday()]
+    
     bloque_historial = "\n".join(historial_chats[chat_id])
     
-    contexto = f"Hora Actual: {hora_str}\n\n{inventario_filtrado}\n\n=== HISTORIAL DE CONVERSACIÓN RECIENTE ===\n{bloque_historial}\nCampo (Tú):"
+    contexto = f"Día Actual: {dia_actual}\nHora Actual: {hora_str}\n\n{inventario_filtrado}\n\n=== HISTORIAL DE CONVERSACIÓN RECIENTE ===\n{bloque_historial}\nCampo (Tú):"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contexto}"}]}]}
@@ -178,7 +184,6 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
                 reply = datos['candidates'][0]['content']['parts'][0]['text'].strip()
                 print("[RESPUESTA EXITOSA]", flush=True)
 
-                # Guardamos la respuesta del bot en la memoria para que no se contradiga después
                 historial_chats[chat_id].append(f"Campo (Tú): {reply}")
                 if len(historial_chats[chat_id]) > 6:
                     historial_chats[chat_id].pop(0)
@@ -192,7 +197,11 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
                     chats_pausados[chat_id] = now
                     reply_limpia = reply.replace("[ESCALAR_VENTAS]", "").replace("[ESCALAR_TECNICO]", "").replace("[ESCALAR_FACTURACION]", "").strip()
                     send_whatsapp_message(chat_id, reply_limpia)
-                    send_whatsapp_message(destino, f"⚠️ ALERTA\nCliente: {chat_id.split('@')[0]}\nRespuesta: {reply_limpia}")
+                    
+                    if destino == NUMERO_FACTURACION:
+                        send_whatsapp_message(destino, f"🚨 ALERTA DE PAGO REALIZADO\nCliente: {chat_id.split('@')[0]}\nVerifica la referencia o comprobante en WhatsApp.\nMensaje del bot: {reply_limpia}")
+                    else:
+                        send_whatsapp_message(destino, f"⚠️ ALERTA DE ASISTENCIA\nCliente: {chat_id.split('@')[0]}\nRespuesta: {reply_limpia}")
                 else:
                     send_whatsapp_message(chat_id, reply)
                 return
@@ -216,7 +225,10 @@ def webhook():
         is_me = body.get('senderData', {}).get('isMe')
         now = get_venezuela_time()
 
-        if chat_id not in NUMEROS_PERMITIDOS and not is_me: return 'OK', 200
+        # ==========================================
+        # ESCUDO VIP DESACTIVADO PARA PRODUCCIÓN
+        # if chat_id not in NUMEROS_PERMITIDOS and not is_me: return 'OK', 200
+        # ==========================================
 
         if is_me:
             text = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '') or body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
@@ -225,23 +237,41 @@ def webhook():
             elif text.strip() == '/bot off': chats_pausados[chat_id] = now
             elif any(frase in text_lower for frase in ["feliz dia", "feliz día", "feliz tarde", "feliz noche", "estamos a la orden", "a su orden", "hasta luego", "gracias por preferirnos"]):
                 chats_pausados.pop(chat_id, None)
-                historial_chats.pop(chat_id, None) # Borra la memoria si un humano cierra la venta
+                historial_chats.pop(chat_id, None)
             return 'OK', 200
 
         if chat_id in chats_pausados:
-            if now - chats_pausados[chat_id] >= timedelta(hours=2): 
+            dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+            dia_actual = dias[now.weekday()]
+            hora_actual_decimal = now.hour + now.minute / 60.0
+            es_horario_laboral = (dia_actual not in ["Sábado", "Domingo"]) and ((8.0 <= hora_actual_decimal < 12.0) or (14.0 <= hora_actual_decimal < 17.0))
+            
+            if now - chats_pausados[chat_id] >= timedelta(hours=2) and es_horario_laboral: 
                 chats_pausados.pop(chat_id, None)
-                historial_chats.pop(chat_id, None) # Reseteo total del cerebro tras 2 horas de inactividad
-            else: return 'OK', 200
+                historial_chats.pop(chat_id, None)
+            else: 
+                return 'OK', 200
 
         texto_usuario = ""
         if msg_type == 'textMessage': texto_usuario = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
         elif msg_type == 'extendedTextMessage': texto_usuario = body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
 
+        # GESTIÓN DE COMPROBANTES DE PAGO Y HORARIOS
         if msg_type not in ['textMessage', 'extendedTextMessage'] or not texto_usuario.strip():
             chats_pausados[chat_id] = now
-            send_whatsapp_message(chat_id, "Archivo recibido. Un técnico lo revisará en breve.")
-            send_whatsapp_message(NUMERO_FACTURACION, f"🚨 ARCHIVO RECIBIDO\nCliente: {chat_id.split('@')[0]}")
+            
+            dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+            dia_actual = dias[now.weekday()]
+            hora_actual_decimal = now.hour + now.minute / 60.0
+            es_horario_laboral = (dia_actual not in ["Sábado", "Domingo"]) and ((8.0 <= hora_actual_decimal < 12.0) or (14.0 <= hora_actual_decimal < 17.0))
+            
+            if es_horario_laboral:
+                send_whatsapp_message(chat_id, "Hemos recibido tu comprobante/archivo. Nuestro equipo validará la información en sistema y te contactará en breve para concretar la entrega.")
+                send_whatsapp_message(NUMERO_FACTURACION, f"🚨 COMPROBANTE DE PAGO RECIBIDO\nCliente: {chat_id.split('@')[0]}\nRevisa el chat de WhatsApp para verificar el capture/documento.")
+            else:
+                send_whatsapp_message(chat_id, "Hemos recibido tu comprobante/archivo. La tienda física se encuentra cerrada en este momento. Procesaremos tu solicitud a primera hora en nuestro próximo bloque de atención laboral.")
+                send_whatsapp_message(NUMERO_FACTURACION, f"🚨 COMPROBANTE DE PAGO RECIBIDO (FUERA DE HORARIO)\nCliente: {chat_id.split('@')[0]}")
+            
             return 'OK', 200
 
         print(f"\n[NUEVO MENSAJE] {chat_id.split('@')[0]}: {texto_usuario}", flush=True)
