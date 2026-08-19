@@ -82,9 +82,6 @@ def send_whatsapp_message(chat_id, text):
     except Exception as e:
         print(f"[GREEN API ERROR DE RED]: {e}", flush=True)
 
-# ==========================================
-# MOTOR DE BÚSQUEDA EN RAM (SIN LATENCIA DE RED)
-# ==========================================
 def obtener_inventario_filtrado(texto_busqueda):
     global CACHE_INVENTARIO
     try:
@@ -97,7 +94,6 @@ def obtener_inventario_filtrado(texto_busqueda):
 
         tiempo_actual = time.time()
         
-        # Renueva la caché cada 15 minutos (900 segundos) para no viajar a Google en cada mensaje
         if tiempo_actual - CACHE_INVENTARIO["ultima_actualizacion"] > 900 or not CACHE_INVENTARIO["matriz"]:
             print("[SISTEMA CACHÉ] Descargando base de datos desde Google Sheets...", flush=True)
             credenciales_json = json.loads(os.environ.get('GOOGLE_CREDENTIALS'))
@@ -128,7 +124,6 @@ def obtener_inventario_filtrado(texto_busqueda):
             else:
                 return "Error interno: Columnas de inventario no encontradas."
 
-        # Extraer variables de la memoria RAM ultrarrápida
         matriz = CACHE_INVENTARIO["matriz"]
         idx_desc = CACHE_INVENTARIO["idx_desc"]
         idx_precio = CACHE_INVENTARIO["idx_precio"]
@@ -204,7 +199,6 @@ def procesar_gemini_y_responder(chat_id, texto_usuario):
     payload = {"contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contexto}"}]}]}
     headers = {'Content-Type': 'application/json'}
 
-    # Reducción del timeout a 35 segundos (Fail-Fast)
     for intento in range(3):
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=35)
@@ -276,13 +270,13 @@ def webhook():
             hora_actual_decimal = now.hour + now.minute / 60.0
             es_horario_laboral = (dia_actual not in ["Sábado", "Domingo"]) and ((8.0 <= hora_actual_decimal < 12.0) or (14.0 <= hora_actual_decimal < 17.0))
             
-        if now - chats_pausados[chat_id] >= timedelta(hours=2) and es_horario_laboral: 
-            chats_pausados.pop(chat_id, None)
-            historial_chats.pop(chat_id, None)
-          else: 
-            print(f"[CHAT PAUSADO EN SILENCIO] Mensaje de {chat_id} ignorado para no interrumpir al humano.", flush=True)
-            return 'OK', 200
-              
+            if now - chats_pausados[chat_id] >= timedelta(hours=2) and es_horario_laboral: 
+                chats_pausados.pop(chat_id, None)
+                historial_chats.pop(chat_id, None)
+            else: 
+                print(f"[CHAT PAUSADO EN SILENCIO] Mensaje de {chat_id} ignorado para no interrumpir al humano.", flush=True)
+                return 'OK', 200
+
         texto_usuario = ""
         if msg_type == 'textMessage': texto_usuario = body.get('messageData', {}).get('textMessageData', {}).get('textMessage', '')
         elif msg_type == 'extendedTextMessage': texto_usuario = body.get('messageData', {}).get('extendedTextMessageData', {}).get('text', '')
