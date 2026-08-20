@@ -130,8 +130,7 @@ def obtener_inventario_filtrado(texto_busqueda):
         idx_stock = CACHE_INVENTARIO["idx_stock"]
         fila_inicio = CACHE_INVENTARIO["fila_inicio"]
         
-        lineas_inventario = ["=== RESULTADOS DEL INVENTARIO (FILTRADO) ==="]
-        coincidencias = 0
+        resultados = []
         
         for fila in matriz[fila_inicio:]:
             if len(fila) <= max(idx_desc, idx_precio, idx_stock): continue
@@ -141,7 +140,11 @@ def obtener_inventario_filtrado(texto_busqueda):
             
             if not producto_original or producto_original == "." or "inactivo" in producto_lower: continue
             
-            if any(clave in producto_lower for clave in claves_utiles):
+            # MAGIA TÉCNICA 2.0: Sistema de Puntuación (Scoring)
+            # Le da 1 punto por cada palabra clave que coincida
+            score = sum(1 for clave in claves_utiles if clave in producto_lower)
+            
+            if score > 0:
                 precio = str(fila[idx_precio]).strip() or "N/A"
                 stock = str(fila[idx_stock]).strip() or "N/A"
                 
@@ -151,15 +154,24 @@ def obtener_inventario_filtrado(texto_busqueda):
                 except ValueError:
                     estado = f"Disponible ({stock})"
                 
-                lineas_inventario.append(f"- {producto_original} | Precio: ${precio} | Stock: {estado}")
-                coincidencias += 1
-                
-                if coincidencias >= 30:
-                    lineas_inventario.append("... (Múltiples resultados encontrados, especifique más su búsqueda).")
-                    break
+                resultados.append({
+                    "texto": f"- {producto_original} | Precio: ${precio} | Stock: {estado}",
+                    "score": score
+                })
         
-        if coincidencias == 0:
+        # Ordenamos los resultados: los que tienen más coincidencias van de primeros
+        resultados = sorted(resultados, key=lambda x: x['score'], reverse=True)
+        
+        if not resultados:
             return "=== RESULTADOS DEL INVENTARIO ===\nProducto no encontrado. Recomienda alternativas o escala a ventas."
+            
+        lineas_inventario = ["=== RESULTADOS DEL INVENTARIO (FILTRADO POR RELEVANCIA) ==="]
+        # Le enviamos a la IA únicamente los 30 productos MÁS relevantes
+        for res in resultados[:30]: 
+            lineas_inventario.append(res["texto"])
+            
+        if len(resultados) > 30:
+            lineas_inventario.append("... (Se omitieron resultados menos relevantes).")
             
         return "\n".join(lineas_inventario)
         
